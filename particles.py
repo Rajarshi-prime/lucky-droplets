@@ -4,9 +4,9 @@ import math
 
 class MPI_particles:
     
-    def __init__(self,comm, L, N, Nprtcl,st_s, st,nu, tau_eta,rho_p,M0 ,d,X,Y,Z, x,y,z):
+    def __init__(self,comm, L, N, Nprtcl,st_s, st,g,nu, tau_eta,rho_p,M0 ,d,X,Y,Z, x,y,z):
         
-        self.comm, self.L, self.N, self.Nprtcl, self.d,self.tau_eta = comm, L, N, Nprtcl,d,tau_eta
+        self.comm, self.L, self.N, self.Nprtcl, self.d,self.g, self.tau_eta = comm, L, N, Nprtcl,d,g,tau_eta
         self.X,self.Y,self.Z, self.x,self.y,self.z = X,Y,Z, x,y,z
         self.dx = X[1] - X[0]
         self.dy = Y[1] - Y[0]
@@ -24,9 +24,9 @@ class MPI_particles:
         self.interporder = 2 #! Power of polynomial +1 
         self.nums = np.arange(self.interporder)
         self.cosorder = 4
-        self.factor = (nu*tau_eta/ (rho_p))**3/2 *(36*np.pi*rho_p)/M0 #! Factor connecting mass and stokes number.
+        self.factor = (nu*tau_eta/ (2*rho_p))**3/2 *(36*np.pi*rho_p)/M0 #! Factor connecting mass and stokes number.
         self.growthfactor = 9 *np.pi*nu/(2*rho_p)
-
+        self.decelerationfactor = (rho_p/(8*nu))**0.5
 
         self.nneighbors = math.ceil(self.cosorder/(2*self.Np)) 
         neighbors = [(self.rank - (self.nneighbors -i))%self.num_process for i in range(self.nneighbors)] + [(self.rank + (i + 1))%self.num_process for i in range(self.nneighbors)]
@@ -44,7 +44,7 @@ class MPI_particles:
         self.coord = np.random.uniform(0,self.L,(self.Nprtcl_proc,2*self.d +1 )) #! Contains both position and velocity and the mass normalized by M0
         self.prtclid = np.arange(self.rank*self.Nprtcl_proc,(self.rank
          + 1)*self.Nprtcl_proc).reshape((-1,1)) #! Unique particle ID
-        self.coord[:,-1] = st**3/2*self.factor
+        self.coord[:,-1] = st**1.5*self.factor
         self.st_s = st_s
         self.st = (self.coord[:,-1]/self.factor)**(2/3.)
         # --------------------------------------------------------------- #
@@ -83,6 +83,7 @@ class MPI_particles:
         """Sends particles to the proper ranks, and calculates the intrinsic variables"""
         
         self.st = (self.coord[:,-1]/self.factor)**(2/3.)
+        self.rhs = 0.0*self.coord
         
     
     def particle_exchange(self,coord):
@@ -703,12 +704,21 @@ class MPI_particles:
         """
 
         coord,[self.coord, self.interpmat,self.exterpmat,self.prtclid,sump] = self.send(coord,[self.coord, self.interpmat,self.exterpmat,self.prtclid,sump])
-        self.st = (self.coord[:,-1]/self.factor)**(2/3.)
+        self.st = (coord[:,-1]/self.factor)**(2/3.)
+        self.rhs = 0.0*coord
+        
         self.interpmat = self.interp_cosine(coord,np.concatenate((u,us,c[None,...]), axis = 0)) #! Interpmat has u,us and c => 2*d+1 components.
-        self.exterpmat[:,0] = self.growthfactor*(1 + (self.st_s/self.st)**0.5)**2 * self.interpmat[:,-1]*np.linalg.norm(self.coord[:,self.d:self.d*2] - self.interpmat[:,self.d: 2*self.d],axis = 1) #! exterpmat is mdot normalized by M0.
-        fc[:] = self.exterp_cosine_scalar(self.coord, fc)
-
-        return sump, np.concatenate((coord[:,self.d:2*self.d],(self.interpmat[:,:self.d]- coord[:,self.d:2*self.d])/(self.st[:,None] *self.tau_eta), self.exterpmat), axis = 1),fc
+        
+        self.exterpmat[:,0] = self.growthfactor*(1 + (self.st_s/self.st)**0.5)**2 * self.interpmat[:,-1]*np.linalg.norm(coord[:,self.d:self.d*2] - self.interpmat[:,self.d: 2*self.d],axis = 1) #! exterpmat is mdot normalized by M0.
+        fc[:] = self.exterp_cosine_scalar(coord, fc)
+        
+        self.rhs[:,:self.d] = coord[:,self.d:2*self.d]
+        self.rhs[:,self.d:2*self.d] =  (self.interpmat[:,:self.d]- coord[:,self.d:2*self.d])/(self.st[:,None] *self.tau_eta)  
+        + (self.decelerationfactor*(1 + (self.st_s/self.st)**0.5)**2/(self.st*self.tau_eta)**0.5*self.interpmat[:,-1]*np.linalg.norm(coord[:,self.d:self.d*2] - self.interpmat[:,self.d: 2*self.d],axis = 1) )[:,None]*(self.interpmat[:,self.d: 2*self.d] - coord[:,self.d:self.d*2]) 
+        self.rhs[:,2*self.d - 1] -= self.g #! Adding gravity in the appropriate units.
+        self.rhs[:,-1] = self.exterpmat[:,0]
+        
+        return sump, self.rhs, fc
 
     
 def RK4(t,h,prtcl, u,us,c):

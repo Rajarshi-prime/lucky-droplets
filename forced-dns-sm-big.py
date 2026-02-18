@@ -8,9 +8,9 @@ from time import time
 import pathlib,os,sys,h5py
 from particles import MPI_particles
 curr_path = pathlib.Path(__file__).parent
-forcestart = True
+forcestart = False
 gravity = False
-start_big_particle = False
+start_big_particle = True
 wg = "with_g" if gravity else "wo_g"
 
 ## ---------------MPI things--------------
@@ -33,7 +33,7 @@ dt_save = 0.5
 st = round(dt_save/dt) #!Savestep : Confusing
 sts = 0.001
 stb0 = 0.05
-Nprtcl = 16
+Nprtcl = 256*40
 d = 3
 M0 = 4e-6
 rhop = 1000
@@ -145,8 +145,7 @@ cond_kz = np.abs(np.round(Kz))<=N//3
 stb = MPI_particles(comm, L, N, Nprtcl,sts, stb0,g,nu, tf,rhop,M0 ,d,X,Y,Z, x,y,z)
 stb.to_interp(2*d+1) # u, v_s and c_s
 stb.to_exterp(1)
-if rank == 0: print(f"{stb.coord[:,-1]}, {stb.st},{(M0*3.5e-8/stb.factor)**(2/3.)}")
-raise SystemExit
+
 
 ## -------------zeros arrays -----------------------
 u  = np.zeros((3, Np, N, N), dtype= np.float64)
