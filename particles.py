@@ -566,6 +566,7 @@ class MPI_particles:
             # dyshift = (1 + np.cos((coordrecv[:,-2,None] - self.Y[yidxshift])*(np.pi/(2*self.dy))))/4.0
             # dzshift = (1 + np.cos((coordrecv[:,-1,None] - self.Z[zidxshift])*(np.pi/(2*self.dz))))/4.0
             # np.add.at(c,(...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None],zidxshift[...,None,:]),coordrecv[:,self.d][:,None,None]*dyshift[...,None]*dzshift[...,None,:]/(self.dx *self.dy *self.dz))
+            c[:] = self.calc_uadd_scalar(c,coordrecv)
             
             # ---------------------------------------------------------------------- #
             
