@@ -1,7 +1,54 @@
 import numpy as np
 from mpi4py import MPI
-import math
+from numba import njit,prange
+import math,atexit
 
+@njit(parallel= True,fastmath = True)
+def _calc_usend_numba(ufield, xidx, yidx,zidx,ypos, zpos,usend, Nprtcl,N , dy , dz , cosorder , Y , Z,comp ):
+
+        for p in prange(Nprtcl):   
+            for i in cosorder:
+                tempyidx = (yidx[p] + i)%N
+                dyshift = (1 + np.cos((ypos[p] - Y[tempyidx])*(np.pi/(2*dy))))/4.0
+
+                for j in cosorder:
+                    tempzidx = (zidx[p] + j)%N
+                    dzshift = (1 + np.cos((zpos[p] - Z[tempzidx])*(np.pi/(2*dz))))/4.0
+                    
+                    for c in prange(comp):
+                        usend[p,c] += ufield[c,xidx[p],tempyidx,tempzidx]*dyshift*dzshift 
+        return usend
+
+
+@njit(parallel= True,fastmath = True)
+def _calc_uadd_numba_scalar(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,N,dx, dy,  dz, cosorder, Y, Z):
+    
+    for p in prange(Nprtcl):   
+        for i in cosorder:
+            tempyidx = (yidx[p] + i)%N
+            dyshift = (1 + np.cos((ypos[p] - Y[tempyidx])*(np.pi/(2*dy))))/4.0
+
+            for j in cosorder:
+                tempzidx = (zidx[p] + j)%N
+                dzshift = (1 + np.cos((zpos[p] - Z[tempzidx])*(np.pi/(2*dz))))/4.0
+                cfield[ xidx[p],tempyidx,tempzidx] += udat[p]*dyshift*dzshift/(dx*dy*dz)
+    return cfield*1.0
+
+@njit(parallel= True,fastmath = True)
+def _calc_uadd_numba_vector(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,N,dx, dy,  dz, cosorder, Y, Z,comp):
+    
+    for p in prange(Nprtcl):   
+        for i in cosorder:
+            tempyidx = (yidx[p] + i)%N
+            dyshift = (1 + np.cos((ypos[p] - Y[tempyidx])*(np.pi/(2*dy))))/4.0
+
+            for j in cosorder:
+                tempzidx = (zidx[p] + j)%N
+                dzshift = (1 + np.cos((zpos[p] - Z[tempzidx])*(np.pi/(2*dz))))/4.0
+                for c in prange(comp):
+                    cfield[c, xidx[p],tempyidx,tempzidx] += udat[p,c]*dyshift*dzshift/(dx*dy*dz)
+    return cfield*1.0
+    
 class MPI_particles:
     
     def __init__(self,comm, L, N, Nprtcl,st_s, st,g,nu, tau_eta,rho_p,M0 ,d,X,Y,Z, x,y,z):
@@ -70,6 +117,12 @@ class MPI_particles:
 
         self.interpmat = np.zeros((self.coord.shape[0],interpdim))
         self.interpdim = interpdim
+        
+        # ------------------- initializing numba array -------------------- #
+        self.calc_usend(np.zeros((interpdim,2,2,2)),np.zeros((2,5)))
+        self.comm.Barrier()
+        if self.rank ==0 : print(f"usend activated")
+        # ----------------------------------------------------------------- #
             
             
     def to_exterp(self,exterpdim):
@@ -78,6 +131,62 @@ class MPI_particles:
         """
         self.exterpmat = np.ones((self.coord.shape[0],exterpdim))
         self.exterpdim = exterpdim
+        
+        # ------------------- initializing numba array -------------------- #
+        if exterpdim >1:
+            self.calc_uadd_vector(np.zeros((exterpdim,2,2,2)),np.zeros((2,5 + exterpdim)))
+        else: 
+            self.calc_uadd_scalar(np.zeros((2,2,2)),np.zeros((2,5 + exterpdim)))
+        self.comm.Barrier()
+        if self.rank ==0 : print(f" uadd activated")
+        # ----------------------------------------------------------------- #    
+        
+        
+    def calc_usend(self,ufield, coordrecv):
+        Nprtcl = coordrecv.shape[0]
+        usend = np.zeros((Nprtcl,self.interpdim))
+        if Nprtcl > 0: 
+            xidx = np.round(coordrecv[:,0]).astype(np.int32)
+            yidx = np.round(coordrecv[:,1]).astype(np.int32)
+            zidx = np.round(coordrecv[:,2]).astype(np.int32)
+            ypos = coordrecv[:,-2]
+            zpos = coordrecv[:,-1]
+            Npass = ufield.shape[-1]
+            
+            return _calc_usend_numba(ufield, xidx, yidx,zidx,ypos, zpos,usend, Nprtcl,Npass, self.dy , self.dz, self.cosorder , self.Y , self.Z,self.interpdim)
+        
+        else: return usend
+        
+    def calc_uadd_scalar(self,cfield,coordrecv):
+        Nprtcl = coordrecv.shape[0]
+        if Nprtcl > 0: 
+            xidx = np.round(coordrecv[:,0]).astype(np.int32)
+            yidx = np.round(coordrecv[:,1]).astype(np.int32)
+            zidx = np.round(coordrecv[:,2]).astype(np.int32)
+            ypos = coordrecv[:,-2]
+            zpos = coordrecv[:,-1]
+            udat = coordrecv[:,self.d]
+            Npass = cfield.shape[-1]
+            
+            return _calc_uadd_numba_scalar(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,Npass,self.dx, self.dy,  self.dz, self.cosorder, self.Y, self.Z)   
+        else: return cfield*1.0
+
+    def calc_uadd_vector(self,cfield,coordrecv):
+        Nprtcl = coordrecv.shape[0]
+        if Nprtcl > 0: 
+            xidx = np.round(coordrecv[:,0]).astype(np.int32)
+            yidx = np.round(coordrecv[:,1]).astype(np.int32)
+            zidx = np.round(coordrecv[:,2]).astype(np.int32)
+            ypos = coordrecv[:,-2]
+            zpos = coordrecv[:,-1]
+            udat = coordrecv[:,self.d:self.d + self.exterpdim]
+            Npass = cfield.shape[-1]
+            
+            return _calc_uadd_numba_vector(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,Npass,self.dx, self.dy,  self.dz, self.cosorder, self.Y, self.Z,self.exterpdim)   
+        else: return cfield*1.0
+
+    
+
     
     def update_intrinsic(self):
         """Sends particles to the proper ranks, and calculates the intrinsic variables"""
@@ -295,7 +404,7 @@ class MPI_particles:
             zidxshift = (np.round(coordrecv[:,2,None]).astype(np.int32) + self.cosorder)%self.N
             dyshift = (1 + np.cos((coordrecv[:,-2,None] - self.Y[yidxshift])*(np.pi/(2*self.dy))))/4.0
             dzshift = (1 + np.cos((coordrecv[:,-1,None] - self.Z[zidxshift])*(np.pi/(2*self.dz))))/4.0
-            usend = np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None,:],zidxshift[...,None]],dyshift,dzshift), [0,1],[1,0]).ravel() # (Nprtcl,d) matrix, d is the components of u.
+            usend = np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None],zidxshift[...,None,:]],dyshift,dzshift), [0,1],[1,0]).ravel() # (Nprtcl,d) matrix, d is the components of u.
             # send the reduced u
 
             sendcounts = np.round(recvcounts*self.d/cdim).astype(np.int32)
@@ -315,7 +424,7 @@ class MPI_particles:
 
                 
             
-            self.interpmat[cond]  += np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,slx[cond,None,None], sly[cond,None,:],slz[cond,:,None]],dyshift_core[cond],dzshift_core[cond]), [0,1],[1,0])*dxshift[cond,None]
+            self.interpmat[cond]  += np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,slx[cond,None,None], sly[cond,:,None],slz[cond,None,:]],dyshift_core[cond],dzshift_core[cond]), [0,1],[1,0])*dxshift[cond,None]
                 
 
         return self.interpmat
@@ -335,11 +444,11 @@ class MPI_particles:
         self.interpmat *=  0.0
         order = 4
         
-        sly = (idx[:,1,None] + self.cosorder)%self.N
-        slz = (idx[:,2,None] + self.cosorder)%self.N
+        # sly = (idx[:,1,None] + self.cosorder)%self.N
+        # slz = (idx[:,2,None] + self.cosorder)%self.N
 
-        dyshift_core = (1 + np.cos((pos[:,-2,None] - self.Y[sly])*(np.pi/(2*self.dy))))/4.0
-        dzshift_core = (1 + np.cos((pos[:,-1,None] - self.Z[slz])*(np.pi/(2*self.dz))))/4.0
+        # dyshift_core = (1 + np.cos((pos[:,-2,None] - self.Y[sly])*(np.pi/(2*self.dy))))/4.0
+        # dzshift_core = (1 + np.cos((pos[:,-1,None] - self.Z[slz])*(np.pi/(2*self.dz))))/4.0
         
         
         for i in range(order):
@@ -370,15 +479,15 @@ class MPI_particles:
             coordrecv = coordrecv.reshape((-1,cdim))
             coordrecv[:,0] %= self.Np
             coordrecv[:,:self.d] = np.round(coordrecv[:,:self.d])
-
             # Calculate the reduced u matrix
-            yidxshift = (np.round(coordrecv[:,1,None]).astype(np.int32) + self.cosorder)%self.N
-            zidxshift = (np.round(coordrecv[:,2,None]).astype(np.int32) + self.cosorder)%self.N
-            dyshift = (1 + np.cos((coordrecv[:,-2,None] - self.Y[yidxshift])*(np.pi/(2*self.dy))))/4.0
-            dzshift = (1 + np.cos((coordrecv[:,-1,None] - self.Z[zidxshift])*(np.pi/(2*self.dz))))/4.0
-            usend = np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None,:],zidxshift[...,None]],dyshift,dzshift), [0,1],[1,0]).ravel() # (Nprtcl,d) matrix, d is the components of u.
-            # send the reduced u
-
+            # yidxshift = (np.round(coordrecv[:,1,None]).astype(np.int32) + self.cosorder)%self.N
+            # zidxshift = (np.round(coordrecv[:,2,None]).astype(np.int32) + self.cosorder)%self.N
+            # dyshift = (1 + np.cos((coordrecv[:,-2,None] - self.Y[yidxshift])*(np.pi/(2*self.dy))))/4.0
+            # dzshift = (1 + np.cos((coordrecv[:,-1,None] - self.Z[zidxshift])*(np.pi/(2*self.dz))))/4.0
+            # usend = np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,:,None],zidxshift[...,None,:]],dyshift,dzshift), [0,1],[1,0]).ravel() # (Nprtcl,d) matrix, d is the components of u.
+            # # send the reduced u
+            usend = self.calc_usend(u,coordrecv).ravel()
+            
             sendcounts = np.round(recvcounts*self.interpdim/cdim).astype(np.int32)
             sdispls = [0] + list(np.cumsum(sendcounts)[:-1])
             recvcounts = np.zeros(self.nneighbors*2,dtype = 'i')
@@ -396,8 +505,8 @@ class MPI_particles:
 
                 
             
-            self.interpmat[cond]  += np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,slx[cond,None,None], sly[cond,None,:],slz[cond,:,None]],dyshift_core[cond],dzshift_core[cond]), [0,1],[1,0])*dxshift[cond,None]
-                
+            # self.interpmat[cond]  += np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,slx[cond,None,None], sly[cond,:.None],slz[cond,None,:]],dyshift_core[cond],dzshift_core[cond]), [0,1],[1,0])*dxshift[cond,None]
+            self.interpmat[cond] += self.calc_usend(u,np.concatenate((slx[cond,None],idx[cond,1:],pos[cond,1:]),axis = 1))*dxshift[cond,None]    
 
         return self.interpmat
     
@@ -408,7 +517,6 @@ class MPI_particles:
         pos = coord[:,:self.d]
         idx = (pos//self.dx).astype(np.int32)
         idx[:,0] %= self.Np
-        self.interpmat *=  0.0
         order = 4
         c *= 0.0
         
@@ -424,6 +532,7 @@ class MPI_particles:
             outcond = (slx < 0) + (slx >= self.Np)
             cond = ~outcond
             #? Send the xidx,yidx,zidx list 
+
             coordsend =  np.concatenate((slx[outcond,None],idx[outcond,1:],self.exterpmat[outcond]*dxshift[outcond,None],pos[outcond,1:]),axis = 1)
             sortarg = coordsend[:,0].argsort()
             coordsend = coordsend[sortarg]
@@ -452,14 +561,17 @@ class MPI_particles:
 
             
             # ------------------- Calculate the reduced u matrix ------------------ #
-            yidxshift = (coordrecv[:,1,None].astype(np.int32) + self.cosorder)%self.N
-            zidxshift = (coordrecv[:,2,None].astype(np.int32) + self.cosorder)%self.N
-            dyshift = (1 + np.cos((coordrecv[:,-2,None] - self.Y[yidxshift])*(np.pi/(2*self.dy))))/4.0
-            dzshift = (1 + np.cos((coordrecv[:,-1,None] - self.Z[zidxshift])*(np.pi/(2*self.dz))))/4.0
-            np.add.at(c,(...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None,:],zidxshift[...,None]),coordrecv[:,self.d][:,None,None]*dyshift[...,None,:]*dzshift[...,None]/(self.dx *self.dy *self.dz))
+            # yidxshift = (coordrecv[:,1,None].astype(np.int32) + self.cosorder)%self.N
+            # zidxshift = (coordrecv[:,2,None].astype(np.int32) + self.cosorder)%self.N
+            # dyshift = (1 + np.cos((coordrecv[:,-2,None] - self.Y[yidxshift])*(np.pi/(2*self.dy))))/4.0
+            # dzshift = (1 + np.cos((coordrecv[:,-1,None] - self.Z[zidxshift])*(np.pi/(2*self.dz))))/4.0
+            # np.add.at(c,(...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None],zidxshift[...,None,:]),coordrecv[:,self.d][:,None,None]*dyshift[...,None]*dzshift[...,None,:]/(self.dx *self.dy *self.dz))
             
             # ---------------------------------------------------------------------- #
-            np.add.at(c,(...,slx[cond,None,None], sly[cond,None,:],slz[cond,:,None]),(self.exterpmat[cond,0]*dxshift[cond])[:,None,None]*dyshift_core[cond,None,:]*dzshift_core[cond,:,None]/(self.dx *self.dy *self.dz))
+            
+            # np.add.at(c,(...,slx[cond,None,None], sly[cond,:,None],slz[cond,None,:]),(self.exterpmat[cond,0]*dxshift[cond])[:,None,None]*dyshift_core[cond,:,None]*dzshift_core[cond,None,:]/(self.dx *self.dy *self.dz))
+            
+            c[:] = self.calc_uadd_scalar(c,np.concatenate((slx[cond,None],idx[cond,1:],self.exterpmat[cond]*dxshift[cond,None],pos[cond,1:]),axis = 1))
         
         return c
         
@@ -470,16 +582,15 @@ class MPI_particles:
         pos = coord[:,:self.d]
         idx = (pos//self.dx).astype(np.int32)
         idx[:,0] %= self.Np
-        self.interpmat *=  0.0
         order = 4
         c *= 0.0
-        sly = (idx[:,1,None] + self.cosorder)%self.N
-        slz = (idx[:,2,None] + self.cosorder)%self.N
+        # sly = (idx[:,1,None] + self.cosorder)%self.N
+        # slz = (idx[:,2,None] + self.cosorder)%self.N
 
-        dyshift_core = (1 + np.cos((pos[:,-2,None] - self.Y[sly])*(np.pi/(2*self.dy))))/4.0
-        dzshift_core = (1 + np.cos((pos[:,-1,None] - self.Z[slz])*(np.pi/(2*self.dz))))/4.0
+        # dyshift_core = (1 + np.cos((pos[:,-2,None] - self.Y[sly])*(np.pi/(2*self.dy))))/4.0
+        # dzshift_core = (1 + np.cos((pos[:,-1,None] - self.Z[slz])*(np.pi/(2*self.dz))))/4.0
   
-        ccomp = np.prod(self.exterpdim.shape[1:]) #! Determines the component of the exterpdim.
+        # ccomp = np.prod(self.exterpdim.shape[1:]) #! Determines the component of the exterpdim.
         for i in range(order):
             slx = (idx[:,0]-order//2+1 + i)
             dxshift =  (1 + np.cos((pos[:,0] - self.X[slx%self.N])*(np.pi/(2*self.dx))))/4.0
@@ -512,14 +623,18 @@ class MPI_particles:
 
             
             # ------------------- Calculate the reduced u matrix and add to the c matrix ------------------ #
-            yidxshift = (coordrecv[:,1,None].astype(np.int32) + self.cosorder)%self.N
-            zidxshift = (coordrecv[:,2,None].astype(np.int32) + self.cosorder)%self.N
-            dyshift = (1 + np.cos((coordrecv[:,-2,None] - self.Y[yidxshift])*(np.pi/(2*self.dy))))/4.0
-            dzshift = (1 + np.cos((coordrecv[:,-1,None] - self.Z[zidxshift])*(np.pi/(2*self.dz))))/4.0
-            np.add.at(c,(...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None,:],zidxshift[...,None]),np.moveaxis(coordrecv[:,self.d:self.d+ccomp],[0,1],[1,0])[...,None,None]*dyshift[...,None,:]*dzshift[...,None])
+            # yidxshift = (coordrecv[:,1,None].astype(np.int32) + self.cosorder)%self.N
+            # zidxshift = (coordrecv[:,2,None].astype(np.int32) + self.cosorder)%self.N
+            # dyshift = (1 + np.cos((coordrecv[:,-2,None] - self.Y[yidxshift])*(np.pi/(2*self.dy))))/4.0
+            # dzshift = (1 + np.cos((coordrecv[:,-1,None] - self.Z[zidxshift])*(np.pi/(2*self.dz))))/4.0
+            # np.add.at(c,(...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None],zidxshift[...,None,:]),np.moveaxis(coordrecv[:,self.d:self.d+ccomp],[0,1],[1,0])[...,None,None]*dyshift[...,None]*dzshift[...,None,:])
+            
+            c[:] = self.calc_uadd_vector(c,coordrecv)
             # ----------------------------------------------------------------------------------------------- #     
             
-            np.add.at(c,(...,slx[cond,None,None], sly[cond,None,:],slz[cond,:,None]),np.moveaxis(self.exterpmat[cond]*dxshift[cond,None],[0,1],[1,0])[...,None,None]*dyshift_core[None, cond,None,:]*dzshift_core[None,cond,:,None])
+            # np.add.at(c,(...,slx[cond,None,None], sly[cond,:,None],slz[cond,None,:]),np.moveaxis(self.exterpmat[cond]*dxshift[cond,None],[0,1],[1,0])[...,None,None]*dyshift_core[None, cond,:,None]*dzshift_core[None,cond,None,:])
+            
+            c[:] = self.calc_uadd_vector(c,np.concatenate((slx[cond,None],idx[cond,1:],self.exterpmat[cond]*dxshift[cond,None],pos[cond,1:]),axis = 1))
             
         return c
 
@@ -577,8 +692,8 @@ class MPI_particles:
             zidxshift = (coordrecv[:,2,None].astype(np.int32) + self.cosorder)%self.N
             dyshift = (1 + np.cos((coordrecv[:,-2,None] - self.Y[yidxshift])*(np.pi/(2*self.dy))))/4.0
             dzshift = (1 + np.cos((coordrecv[:,-1,None] - self.Z[zidxshift])*(np.pi/(2*self.dz))))/4.0
-            np.add.at(c,(...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None,:],zidxshift[...,None]),coordrecv[:,self.d][:,None,None]*dyshift[...,None,:]*dzshift[...,None]/(self.dx *self.dy *self.dz))
-            usend = np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None,:],zidxshift[...,None]],dyshift,dzshift), [0,1],[1,0]).ravel() # (Nprtcl,d) matrix, d is the components of u.
+            np.add.at(c,(...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None],zidxshift[...,None,:]),coordrecv[:,self.d][:,None,None]*dyshift[...,None]*dzshift[...,None,:]/(self.dx *self.dy *self.dz))
+            usend = np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None],zidxshift[...,None,:]],dyshift,dzshift), [0,1],[1,0]).ravel() # (Nprtcl,d) matrix, d is the components of u.
             # ---------------------------------------------------------------------- #
 
             # ------------------- send the reduced u ------------------ #
@@ -606,9 +721,9 @@ class MPI_particles:
                         
 
                 
-            self.interpmat[cond]  += np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,slx[cond,None,None], sly[cond,None,:],slz[cond,:,None]],dyshift_core[cond],dzshift_core[cond]), [0,1],[1,0])*dxshift[cond,None]
+            self.interpmat[cond]  += np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,slx[cond,None,None], sly[cond,:,None],slz[cond,None,:]],dyshift_core[cond],dzshift_core[cond]), [0,1],[1,0])*dxshift[cond,None]
             
-            np.add.at(c,(...,slx[cond,None,None], sly[cond,None,:],slz[cond,:,None]),(self.exterpmat[cond,0]*dxshift[cond])[:,None,None]*dyshift_core[cond,None,:]*dzshift_core[cond,:,None]/(self.dx *self.dy *self.dz))
+            np.add.at(c,(...,slx[cond,None,None], sly[cond,:,None],slz[cond,None,:]),(self.exterpmat[cond,0]*dxshift[cond])[:,None,None]*dyshift_core[cond,:,None]*dzshift_core[cond,None,:]/(self.dx *self.dy *self.dz))
         
         return self.interpmat,c
     
@@ -665,8 +780,8 @@ class MPI_particles:
             zidxshift = (coordrecv[:,2,None].astype(np.int32) + self.cosorder)%self.N
             dyshift = (1 + np.cos((coordrecv[:,-2,None] - self.Y[yidxshift])*(np.pi/(2*self.dy))))/4.0
             dzshift = (1 + np.cos((coordrecv[:,-1,None] - self.Z[zidxshift])*(np.pi/(2*self.dz))))/4.0
-            np.add.at(c,(...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None,:],zidxshift[...,None]),np.moveaxis(coordrecv[:,self.d:self.d+ccomp],[0,1],[1,0])[...,None,None]*dyshift[...,None,:]*dzshift[...,None])
-            usend = np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None,:],zidxshift[...,None]],dyshift,dzshift), [0,1],[1,0]).ravel() # (Nprtcl,d) matrix, d is the components of u.
+            np.add.at(c,(...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None],zidxshift[...,None,:]),np.moveaxis(coordrecv[:,self.d:self.d+ccomp],[0,1],[1,0])[...,None,None]*dyshift[...,None]*dzshift[...,None,:])
+            usend = np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None],zidxshift[...,None,:]],dyshift,dzshift), [0,1],[1,0]).ravel() # (Nprtcl,d) matrix, d is the components of u.
             # ----------------------------------------------------------------------------------------------- #
 
             # ------------------- send the reduced u ------------------ #
@@ -689,10 +804,10 @@ class MPI_particles:
             # Add to the value
             self.interpmat[outcond.nonzero()[0][sortarg]] += urecv*dxshift[outcond.nonzero()[0][sortarg],None]
                 
-            self.interpmat[cond]  += np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,slx[cond,None,None], sly[cond,None,:],slz[cond,:,None]],dyshift_core[cond],dzshift_core[cond]), [0,1],[1,0])*dxshift[cond,None]
+            self.interpmat[cond]  += np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,slx[cond,None,None], sly[cond,:,None],slz[cond,None,:]],dyshift_core[cond],dzshift_core[cond]), [0,1],[1,0])*dxshift[cond,None]
             
             
-            np.add.at(c,(...,slx[cond,None,None], sly[cond,None,:],slz[cond,:,None]),np.moveaxis(self.exterpmat[cond]*dxshift[cond,None],[0,1],[1,0])[...,None,None]*dyshift_core[None, cond,None,:]*dzshift_core[None,cond,:,None])
+            np.add.at(c,(...,slx[cond,None,None], sly[cond,:,None],slz[cond,None,:]),np.moveaxis(self.exterpmat[cond]*dxshift[cond,None],[0,1],[1,0])[...,None,None]*dyshift_core[None, cond,:,None]*dzshift_core[None,cond,None,:]/(self.dx *self.dy *self.dz))
             
         return self.interpmat,c
 

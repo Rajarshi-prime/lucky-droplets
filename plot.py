@@ -4,10 +4,10 @@ import matplotlib.pyplot as plt
 import pathlib
 from scipy.fft import fftfreq,rfftn, irfftn
 # %%
-N =64
-num_process = 32
+N =256
+num_process = 256
 Np = N//num_process
-datapath = "/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_64_Re_29.4/last/wo_g_sts_0.001"
+datapath = "/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_256_Re_273.5/last/wo_g_sts_0.001"
 #%%
 PI = np.pi
 TWO_PI = 2*PI
@@ -39,10 +39,13 @@ nspectra = e3d_to_e1d(np.abs(nk)**2*normalize)
 nspectra.sum(), (n**2).sum()*dx*dy*dz
 
 #%%
-plt.loglog(nspectra)
-# plt.xlim(None, N//3)
+k =np.arange(nspectra.size)
+plt.loglog(k[1:],(k**(-1.5)*nspectra)[1:])
+
+#%%
+plt.plot(n[0,0],'.-')
 # %%
-p1 = plt.imshow(n[...,0],origin = 'lower', cmap = 'Greys',vmin = 0)
+p1 = plt.imshow(n[10,],origin = 'lower', cmap = 'Greys',vmin = 0)
 plt.colorbar(p1)
 
 #%%
