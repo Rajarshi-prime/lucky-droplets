@@ -9,7 +9,10 @@ import pathlib,os,sys,h5py
 from particles import MPI_particles
 curr_path = pathlib.Path(__file__).parent
 forcestart = False
-gravity = False
+if int(sys.argv[-1]) ==0 :
+    gravity = False
+else: 
+    gravity = True
 start_big_particle = True
 wg = "with_g" if gravity else "wo_g"
 
@@ -27,15 +30,21 @@ else : isexplicit = 0.
 
 ## ------------- Time steps --------------
 N = 256
-dt =  0.256/N #! Such that increasing resolution will decrease the dt
-T = 40
-dt_save = 0.5
+dt =  0.2*0.256/N #! Such that increasing resolution will decrease the dt
+T = 20
+dt_save = 0.1
 st = round(dt_save/dt) #!Savestep : Confusing
 sts = 0.001
-stb0 = 0.05
-Nprtcl = 256*40
+stb_s = [0.017,0.017/4, 0.017*4,0.017*6.35]
+# stb_s = [0.017/4,0.017/9]
+stb_s.sort()
+stb_s= np.array(stb_s)
+Nprtcl = np.round(8192*(0.017/stb_s)**1.5).astype(np.int32) #! 10240 0.017 St particles.
+if rank ==0: print(f"Stokes numbers:{stb_s}, number of particles : {Nprtcl}")
+# if rank ==0 : print(f"prtcl per rank : {Nprtcl//num_process}")
+# raise SystemExit 
 d = 3
-M0 = 4e-6
+M0 = 7.2e-4 #2.6\mu m particles with volfrac 1e-6.
 rhop = 1000
 
 
@@ -79,26 +88,31 @@ if rank ==0 : print(kx_diff.shape, ky_diff.shape, kz_diff.shape)
 lp = 1 # Hyperviscosity power
 # nu0 = 8.192 #! Viscosity for N = 1
 # nu0 = 4.714 #! Viscosity from Pope's 256 run 
-nu0 = 0.8 #! Viscosity for N = 1
-m = 1.5 #! Desired kmax*eta
-nu = nu0*(3*m/N)**(2*(lp - 1/3)) #? scaling with resolution. For 512, nu = 0.002 #! Need to add scaling for hyperviscosity
+nu0 = 0.59 #! Viscosity for N = 1
+m = float(sys.argv[-2]) #! Desired kmax*eta
+
+kmax = N*2**0.5//3
+eta = m/kmax
+nu = nu0*(eta)**(2*(lp - 1/3)) #? scaling with resolution. For 512, nu = 0.002 #! Need to add scaling for hyperviscosity
 # nu = nu0/(N**(4/3))  #? old school new one should give the same value at m = 2.0
 
 einit = 1*(TWO_PI)**3 # Initial energy
 # einit = 0.5*(TWO_P*I)**3 # Initial energy for pope's viscosity
 
+
 nshells = 1 # Number of consecutive shells to be forced
 shell_no = np.arange(1,1+nshells) # the shells to be forced 
-
-tf = (9*(m/N)**(2/3))/nu0 #* the expected kolvmogorov time scale 
+tf =eta**2/nu #* the expected kolvmogorov time scale 
 tps = sts*tf # The particle timescale
-g = 9.81*0.1/tf if gravity else 0 # Gravity in the simulation units
+eta_dim = 0.03
+tau_eta_dim = 6e-4
+g = 9.81*(tau_eta_dim**2/eta_dim)*(eta/tf**2) if gravity else 0 # Gravity in the simulation units
 #----  Kolmogorov length scale - \eta \epsilon etc...---------
 
 f0 = (nu0)**3 * TWO_PI**3/ nshells #! Total power input at each shells
 
 
-if rank ==0 : print(f" Power input  density : {nshells*f0/TWO_PI**3} \n Viscosity : {nu}, Re : {1/nu},dt : {dt}, desired t_eta {tf}")
+if rank ==0 : print(f" Power input  density : {nshells*f0/TWO_PI**3} \n Viscosity : {nu}, Re : {1/nu},dt : {dt}, desired t_eta {tf}, gravity {gravity}")
 
 param = dict()
 param["nu"] = nu
@@ -127,8 +141,11 @@ lap = -(kx**2 + ky**2 + kz**2 )
 k = (-lap)**0.5
 kint = np.clip(np.round(k,0).astype(int),None,N//2)
 # kh = (kx**2 + ky**2)**0.5
-dealias = kint<=N/3 #! Spherical dealiasing
+# dealias = kint<=N/3 #! Spherical dealiasing
 # dealias = (abs(kx)<N//3)*(abs(ky)<N//3)*(abs(kz)<N//3)
+dealias = kint<=2**0.5*N/3 #! Spherical dealiasing
+phase_k = np.exp(1j*(kx*dx/2. + ky*dy/2. + kz*dz/2.)) *dealias
+conjphase_k = np.conjugate(phase_k)*dealias
 invlap = dealias/np.where(lap == 0, np.inf,  lap)
 
 # Hyperviscous operator
@@ -141,24 +158,30 @@ shells[0] = 0.
 cond_ky = np.abs(np.round(Ky))<=N//3
 cond_kz = np.abs(np.round(Kz))<=N//3
 ## -------------------------------------------------
+stbs = []
+for i,stb in enumerate(stb_s):
 
-stb = MPI_particles(comm, L, N, Nprtcl,sts, stb0,g,nu, tf,rhop,M0 ,d,X,Y,Z, x,y,z)
-stb.to_interp(2*d+1) # u, v_s and c_s
-stb.to_exterp(1)
+    stbs.append(MPI_particles(comm, L, N, Nprtcl[i],sts, stb,g,nu, tf,rhop,M0 ,d,X,Y,Z, x,y,z))
+    stbs[i].to_interp(2*d+1) # u, v_s and c_s
+    stbs[i].to_exterp(1)
 
 
 ## -------------zeros arrays -----------------------
 u  = np.zeros((3, Np, N, N), dtype= np.float64)
 v  = np.zeros((3, Np, N, N), dtype= np.float64)
+vtemp  = np.zeros((3, Np, N, N), dtype= np.float64)
 vn  = np.zeros((3, Np, N, N), dtype= np.float64)
 omg= np.zeros((3, Np, N, N), dtype= np.float64)
-n = u[0].copy()
+n = np.zeros((len(stbs),Np,N,N))
+ntemp = n[0].copy()
 nnew = n.copy()
 
 
 uk = np.zeros((3, N, Np, Nf), dtype= np.complex128)
-vnk = np.zeros((3, N, Np, Nf), dtype= np.complex128)
+vk = np.zeros((3, N, Np, Nf), dtype= np.complex128)
+divvnk = uk[0].copy()
 pk = uk[0].copy()
+nk = uk[0].copy()
 ek = np.zeros_like(pk, dtype = np.float64)
 Pik = np.zeros_like(pk, dtype = np.float64)
 ek_arr = np.zeros(Nf)
@@ -179,13 +202,13 @@ rhswk = rhsuk.copy()
 rhsu = np.zeros_like(u[0])
 rhsv = rhsu.copy()
 rhsw = rhsu.copy()
-
-
-
+sump = [1.0*stb.coord for stb in stbs]
+tempcoord = [1.0*stb.coord for stb in stbs]
+kps = [0.0]*len(stbs)
 
 ku = np.zeros((3, N, Np, Nf), dtype = np.complex128)
 kn = n.copy()
-fc = n.copy()
+fc = n[0].copy()
 fck = pk.copy()
 
 arr_temp_k = np.zeros((N, Np, N),dtype= np.float64)
@@ -285,26 +308,49 @@ def clip_zero(x):
     
     return x*oldmean/newmean
 
-def full_RHS(t,uk, n,sump, coord, stb,ku =ku,kn = kn,fc = fc,visc = 1,forc = 1):
+def full_RHS(t,uk, n,sump, tempcoord, stbs,ku =ku,kn = kn,fc = fc,visc = 1,forc = 1,kps = kps):
+    global rhsu ,rhsv , rhsw , rhsuk ,rhsvk , rhswk, nk, vn, ntemp, divvnk,fck
     ## The RHS terms of u, v and w excluding the forcing and the hypervisocsity term 
     fk[:] = forcing(uk,fk)*forc
         
-    u[0] = irfft_mpi(uk[0], u[0])
-    u[1] = irfft_mpi(uk[1], u[1])
-    u[2] = irfft_mpi(uk[2], u[2])
+    u[0] = irfft_mpi(uk[0]*phase_k*dealias, u[0])
+    u[1] = irfft_mpi(uk[1]*phase_k*dealias, u[1])
+    u[2] = irfft_mpi(uk[2]*phase_k*dealias, u[2])
     
-    omg[0] = irfft_mpi(1j*(ky*uk[2] - kz*uk[1]),omg[0])
-    omg[1] = irfft_mpi(1j*(kz*uk[0] - kx*uk[2]),omg[1])
-    omg[2] = irfft_mpi(1j*(kx*uk[1] - ky*uk[0]),omg[2])
+    
+    
+    omg[0] = irfft_mpi(1j*(ky*uk[2] - kz*uk[1])*phase_k*dealias,omg[0])
+    omg[1] = irfft_mpi(1j*(kz*uk[0] - kx*uk[2])*phase_k*dealias,omg[1])
+    omg[2] = irfft_mpi(1j*(kx*uk[1] - ky*uk[0])*phase_k*dealias,omg[2])
     
     rhsu[:] = (omg[2]*u[1] - omg[1]*u[2])
     rhsv[:] = (omg[0]*u[2] - omg[2]*u[0])
     rhsw[:] = (omg[1]*u[0] - omg[0]*u[1]) 
     
+
+    rhsuk[:]  = (rfft_mpi(rhsu, pk) )*conjphase_k*dealias*0.5
+    rhsvk[:]  = (rfft_mpi(rhsv, pk) )*conjphase_k*dealias*0.5
+    rhswk[:]  = (rfft_mpi(rhsw, pk) )*conjphase_k*dealias*0.5
     
-    rhsuk[:]  = (rfft_mpi(rhsu, rhsuk) + fk[0])*dealias 
-    rhsvk[:]  = (rfft_mpi(rhsv, rhsvk) + fk[1])*dealias 
-    rhswk[:]  = (rfft_mpi(rhsw, rhswk) + fk[2])*dealias 
+    u[0] = irfft_mpi(uk[0]*dealias, u[0])
+    u[1] = irfft_mpi(uk[1]*dealias, u[1])
+    u[2] = irfft_mpi(uk[2]*dealias, u[2])
+
+    
+    omg[0] = irfft_mpi(1j*(ky*uk[2] - kz*uk[1])*dealias,omg[0])
+    omg[1] = irfft_mpi(1j*(kz*uk[0] - kx*uk[2])*dealias,omg[1])
+    omg[2] = irfft_mpi(1j*(kx*uk[1] - ky*uk[0])*dealias,omg[2])
+
+    
+    rhsu[:] = (omg[2]*u[1] - omg[1]*u[2])
+    rhsv[:] = (omg[0]*u[2] - omg[2]*u[0])
+    rhsw[:] = (omg[1]*u[0] - omg[0]*u[1])
+    
+    
+    
+    rhsuk += (rfft_mpi(rhsu, pk) )*dealias*0.5 + fk[0]*dealias
+    rhsvk += (rfft_mpi(rhsv, pk) )*dealias*0.5 + fk[1]*dealias
+    rhswk += (rfft_mpi(rhsw, pk) )*dealias*0.5 + fk[2]*dealias  
     
     ## The pressure term
     pk[:] = 1j*invlap  * (kx*rhsuk + ky*rhsvk + kz*rhswk)
@@ -317,51 +363,84 @@ def full_RHS(t,uk, n,sump, coord, stb,ku =ku,kn = kn,fc = fc,visc = 1,forc = 1):
     ku[2] = rhswk - 1j*kz*pk - nu*((-lap)**lp)*uk[2]*isexplicit * visc
     
     #the rhs for the number density
-    v[0] = irfft_mpi((uk[0] - tps*(-1j*kx*pk - nu*((-lap)**lp)*uk[0]*isexplicit * visc))*dealias, v[0])
-    v[1] = irfft_mpi((uk[1] - tps*(-1j*ky*pk - nu*((-lap)**lp)*uk[1]*isexplicit * visc))*dealias, v[1])
-    v[2] = irfft_mpi((uk[2] - tps*(-1j*kz*pk - nu*((-lap)**lp)*uk[2]*isexplicit * visc))*dealias, v[2]) -tps*g
+    vk[0] = uk[0] - tps*(ku[0] - rhsuk)*dealias #! DuDt =  ku - nonlinear part.
+    vk[1] = uk[1] - tps*(ku[1] - rhsvk)*dealias #! DuDt =  ku - nonlinear part.
+    vk[2] = uk[2] - tps*(ku[2] - rhswk)*dealias #! DuDt =  ku - nonlinear part.
     
+    vtemp[0] = irfft_mpi(vk[0]*phase_k*dealias, v[0])
+    vtemp[1] = irfft_mpi(vk[1]*phase_k*dealias, v[1])
+    vtemp[2] = irfft_mpi(vk[2]*phase_k*dealias, v[2]) 
+    
+    v[0] = irfft_mpi(vk[0]*dealias, v[0])
+    v[1] = irfft_mpi(vk[1]*dealias, v[1])
+    v[2] = irfft_mpi(vk[2]*dealias, v[2]) -tps*g *2.0 #! Adding 2 on gravity so that it gets adjusted when added with a factor of half.
 
-    sump, kp, fc = stb.pRHS(t, coord, u,v,n,fc,sump)
-    fck[:] = rfft_mpi(fc, fck)*dealias
-    vn[:] = n[None,...]*v
-    vnk[0] = rfft_mpi(vn[0],vnk[0])*dealias
-    vnk[1] = rfft_mpi(vn[1],vnk[1])*dealias
-    vnk[2] = rfft_mpi(vn[2],vnk[2])*dealias
-    kn[:] = irfft_mpi((-1j* (kx*vnk[0] + ky*vnk[1] + kz*vnk[2]) - fck)*dealias, kn) #! fck is the growth rate. so the - sign
+    for ii in range(len(stbs)):
         
-    return ku,kn,kp,sump
+        nk[:] = rfft_mpi(n[ii],nk)*dealias
+        vn[:] = irfft_mpi(nk*phase_k*dealias, ntemp)[None,...]*vtemp
+        
+        divvnk[:] = 0.0
+        divvnk += 1j*kx*rfft_mpi(vn[0],pk)*conjphase_k*dealias*0.5
+        divvnk += 1j*ky*rfft_mpi(vn[1],pk)*conjphase_k*dealias*0.5
+        divvnk += 1j*kz*rfft_mpi(vn[2],pk)*conjphase_k*dealias*0.5
+        
+
+        sump[ii], kps[ii], fc[:] = stbs[ii].pRHS(t, tempcoord[ii], u,v,n[ii],fc,sump[ii])
+        comm.Barrier()
+        
+        vn[:] = irfft_mpi(nk, ntemp)[None,...]*v
+        
+        divvnk += 1j*kx*rfft_mpi(vn[0],pk)*dealias*0.5
+        divvnk += 1j*ky*rfft_mpi(vn[1],pk)*dealias*0.5
+        divvnk += 1j*kz*rfft_mpi(vn[2],pk)*dealias*0.5
+        
+        fck[:] = rfft_mpi(fc, fck)*dealias
+        kn[ii] = irfft_mpi(-divvnk - fck ,kn[ii]) #! fck is the mass growth rate. so the - sign
+    
+    comm.Barrier()    
+    return ku,kn,kps,sump
 
     
-def RK4(t,h,stb, uk,n,uknew = uknew, nnew = nnew):
+def RK4(t,h,stbs, uk,n,uknew = uknew, nnew = nnew,sump = sump, tempcoord = tempcoord,kps = kps):
     """Template on how to evolve the particle + flow system"""
-    sump = 1.0*stb.coord
     uknew[:] = 1.0*uk
-    nnew[:] = 1.0*n
-    
-    ku[:],kn[:],kp,sump = full_RHS(t,uk, clip_zero(n),sump,stb.coord,stb)
-    sump += h/6.0*kp
+    nnew[:] = 1.0*n    
+    for j in range(len(stbs)):
+        sump[j] = stbs[j].coord*1.0
+        tempcoord[j] = stbs[j].coord*1.0
+    ku[:],kn[:],kps[:],sump[:] = full_RHS(t,uk, clip_zero(n),sump,tempcoord,stbs)
+    for j in range(len(stbs)): 
+        sump[j] += h/6.0*kps[j]
+        tempcoord[j] = stbs[j].coord + h/2 *kps[j]
     uknew += h/6.0*ku
     nnew += h/6.0*kn
     
 
-    ku[:],kn[:],kp,sump = full_RHS(t + h/2,uk + ku*h/2, clip_zero(n + kn*h/2),sump, stb.coord + h/2 *kp, stb)
-    sump += h/3.0*kp
+    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h/2,uk + ku*h/2, clip_zero(n + kn*h/2),sump, tempcoord, stbs)
+    for j in range(len(stbs)): 
+        sump[j] += h/3.*kps[j]
+        tempcoord[j] = stbs[j].coord + h/2 *kps[j]
     uknew += h/3.0*ku
     nnew += h/3.0*kn
     
-    ku[:],kn[:],kp,sump = full_RHS(t + h/2,uk + ku*h/2, clip_zero(n + kn*h/2),sump, stb.coord + h/2 *kp, stb)
-    sump += h/3.0*kp
+    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h/2,uk + ku*h/2, clip_zero(n + kn*h/2),sump, tempcoord, stbs)
+    for j in range(len(stbs)): 
+        sump[j] += h/3.0*kps[j]
+        tempcoord[j] = stbs[j].coord + h *kps[j]
     uknew += h/3.0*ku
     nnew += h/3.0*kn
     
-    ku[:],kn[:],kp,sump = full_RHS(t + h,uk + ku*h, clip_zero(n + kn*h),sump, stb.coord + h *kp, stb)
-    sump += h/6.0*kp
+    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h,uk + ku*h, clip_zero(n + kn*h),sump, tempcoord, stbs)
+    for j in range(len(stbs)): 
+        sump[j] += h/6.*kps[j]
+        stbs[j].coord = 1.0*sump[j]
+        
     uknew += h/6.0*ku
     nnew += h/6.0*kn
     
-    return sump*1.0, uknew,nnew
-
+    return uknew,nnew
+    
 
 ## -----------------------------------------------------------
 
@@ -389,15 +468,18 @@ def load_npz(paths,uk,n,tps = tps, tf = tf,loadn=  True): #! Rewrite
             if loadn== True:
                 if start_big_particle: 
                     nField = np.load(paths/f"{wg}_sts_{tps/tf:.3f}/n_{slab}.npz")
+                    n[:,lidx] = nField['n'][idx][None,...]
                 else: 
-                    nField = np.load(paths/f"{wg}_sts_{tps/tf:.3f}_stb_{stb0:.3f}/n_{slab}.npz")
-            
+                    for ii in range(len(stbs)):
+                        nField = np.load(paths/f"{wg}_sts_{tps/tf:.3f}_stb_{stb_s[ii]:.3f}/n_{slab}.npz")
+                        n[ii,lidx] = nField['n'][idx][None,...]
+            else: n[lidx] = 1.0
+
         slab_old = slab
         uk[0,:,lidx] = Field['uk'][:,idx]
         uk[1,:,lidx] = Field['vk'][:,idx]
         uk[2,:,lidx] = Field['wk'][:,idx]
-        if loadn== True: n[lidx] = nField['n'][idx]
-        else: n[lidx] = 1.0
+
 
         """Loading the OG data"""
         # if slab_old != slab:  Field = np.load(paths/f"Fields_{slab}.npz")
@@ -417,13 +499,15 @@ def load_hdf5(paths, u, n,tps =tps, tf = tf):
     
     return u,n
 
-def save(i,uk,n,stb,tf = tf, tps = tps): 
-    
+def save(i,uk,n,stbs,tf = tf, tps = tps): 
+    # return None
     # div = diff_x(u[0], rhsu) + diff_y(u[1],rhsv) + diff_z(u[2],rhsw)
     # if rank == 0: print(f"Rank {rank} has divergence {np.sum(np.abs(div))}")
     ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
-
-    ku[:],_,_,_ = full_RHS(t,uk, n,stb.coord, stb.coord, stb,visc = 0,forc = 0)
+    for ii in range(len(stbs)):
+        sump[ii] = stbs[ii].coord*1.0
+        tempcoord[ii] = stbs[ii].coord*1.0
+    ku[:],_,_,_ = full_RHS(t,uk, n,sump, tempcoord, stbs,visc = 0,forc = 0)
     Pik[:] = np.real(np.conjugate(uk[0])*ku[0]+np.conjugate(uk[1])*ku[1]+ np.conjugate(uk[2])*ku[2])*dealias*normalize
     Pik_arr[:] = comm.allreduce(e3d_to_e1d(Pik),op = MPI.SUM)
     Pik_arr[:] = np.cumsum(Pik_arr[::-1])[::-1]
@@ -437,28 +521,43 @@ def save(i,uk,n,stb,tf = tf, tps = tps):
     # ----------- ----------------------------
     #                 Saving the data (field)
     # ----------- ----------------------------
-    if Nprtcl > 0: new_dir = savePath/f"time_{t[i]:.1f}/{wg}_sts_{tps/tf:.3f}_stb_{stb0:.3f}"
-    else: new_dir = savePath/f"last/{wg}_sts_{tps/tf:.3f}"
+    if (Nprtcl > 0).any(): new_dir = savePath/f"time_{t[i]:.1f}"
+    else: new_dir = savePath/f"last"
     try: new_dir.mkdir(parents=True,  exist_ok=True)
     except FileExistsError: pass
-    new_dir = new_dir.parent #* coming back to the old directory
     comm.Barrier()
 
     np.savez_compressed(f"{new_dir}/Fields_k_{rank}",uk = uk[0],vk = uk[1],wk = uk[2])
     np.savez_compressed(f"{new_dir}/Energy_spectrum",ek = ek_arr)
     np.savez_compressed(f"{new_dir}/Flux_spectrum",Pik = Pik_arr)
-    if Nprtcl > 0: np.savez_compressed(f"{new_dir}/{wg}_sts_{tps/tf:.3f}_stb_{stb0:.3f}/n_{rank}",n = n)
-    else: np.savez_compressed(f"{new_dir}/{wg}_sts_{tps/tf:.3f}/n_{rank}",n = n)
+    for jj in range(len(stbs)):
+        
+        if Nprtcl[jj] > 0: 
+            new_dir_s = new_dir/f"{wg}_sts_{tps/tf:.3f}_stb_{stb_s[jj]:.3f}/"
+            try: new_dir_s.mkdir(parents=True,  exist_ok=True)
+            except FileExistsError: pass
+            comm.Barrier()
+            np.savez_compressed(new_dir_s/f"n_{rank}",n = n[jj])
+            
+            new_dir_b = new_dir/f"{wg}_stb_{stb_s[jj]:.3f}_sts_{tps/tf:.3f}"
+            try: new_dir_b.mkdir(parents=True,  exist_ok=True)
+            except FileExistsError: pass
+            
+            stb = stbs[jj]
+            stb.coord,[stb.interpmat,stb.exterpmat,stb.prtclid] = stb.send(stb.coord,[stb.interpmat,stb.exterpmat,stb.prtclid])
+            stb.st = (stb.coord[:,-1]/stb.factor)**(2/3.)
+            stb.interpmat = stb.interp_cosine(stb.coord,np.concatenate((u,u,n[jj,None,...]), axis = 0))
+            np.savez_compressed(new_dir_b/f"state_{rank}.npz",pos= stb.coord[:,:d],vel = stb.coord[:,d:2*d], mass = stb.coord[:,-1],prtclid = stb.prtclid, umat = stb.interpmat[:,:d])
+        
+        
+        else: 
+            new_dir_s = new_dir/f"{wg}_sts_{tps/tf:.3f}/"
+            try: new_dir_s.mkdir(parents=True,  exist_ok=True)
+            except FileExistsError: pass
+            comm.Barrier()
+            np.savez_compressed(new_dir_s/f"n_{rank}",n = n[jj])
     
-    if Nprtcl> 0:
-        new_dir = savePath/f"time_{t[i]:.1f}/{wg}_stb_{stb0:.3f}_sts_{tps/tf:.3f}"
-        try: new_dir.mkdir(parents=True,  exist_ok=True)
-        except FileExistsError: pass
-        comm.Barrier()
-        stb.coord,[stb.interpmat,stb.exterpmat,stb.prtclid] = stb.send(stb.coord,[stb.interpmat,stb.exterpmat,stb.prtclid])
-        stb.st = (stb.coord[:,-1]/stb.factor)**(2/3.)
-        stb.interpmat = stb.interp_cosine(stb.coord,np.concatenate((u,u,n[None,...]), axis = 0))
-        np.savez_compressed(new_dir/f"state_{rank}.npz",pos= stb.coord[:,:d],vel = stb.coord[:,d:2*d], mass = stb.coord[:,-1],prtclid = stb.prtclid, umat = stb.interpmat[:,:d])
+
     
     comm.Barrier()
     
@@ -478,81 +577,12 @@ def save(i,uk,n,stb,tf = tf, tps = tps):
         print(f"Maximum divergence {divmax}")
         print(f"n mean, max ,min : {nmean, nmax, nmin}")
         # print( "#----------------------------","\n",f"Total dissipation at time {t[i]} is : {dissp}","\n","#----------------------------")
-
+    comm.Barrier()
     return "Done!"    
     
     
     
-    
-def save_hdf5(i,uk,n,tf = tf, tps = tps):
-    
-    # div = diff_x(u[0], rhsu) + diff_y(u[1],rhsv) + diff_z(u[2],rhsw)
-    # if rank == 0: print(f"Rank {rank} has divergence {np.sum(np.abs(div))}")
-    ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
-    
-    k1u[:],_ = RHS(uk,n, k1u,k1n, visc = 0,forc = 0.0)
-    Pik[:] = np.real(np.conjugate(uk[0])*k1u[0]+np.conjugate(uk[1])*k1u[1]+ np.conjugate(uk[2])*k1u[2])*dealias*normalize
-    Pik_arr[:] = comm.allreduce(e3d_to_e1d(Pik),op = MPI.SUM)
-    Pik_arr[:] = np.cumsum(Pik_arr[::-1])[::-1]
-    
-    ek_arr[:] = 0.0
-    ek_arr[:] = comm.allreduce(e3d_to_e1d(ek),op = MPI.SUM) #! This is the shell-summed ek array.
-    
-    u[0] = irfft_mpi(uk[0], u[0])
-    u[1] = irfft_mpi(uk[1], u[1])
-    u[2] = irfft_mpi(uk[2], u[2])
-    # ----------- ----------------------------
-    #                 Saving the data (field)
-    # ----------- ----------------------------
-    new_dir = savePath/f"time_{t[i]:.1f}"
-    try: new_dir.mkdir(parents=True,  exist_ok=True)
-    except FileExistsError: pass
-    comm.Barrier()
-
-    with h5py.File(new_dir/'Fields.hdf5','w', driver = 'mpio', comm = comm) as f:
-        f.create_dataset('u', (N,N,N),dtype = np.float64)
-        f.create_dataset('v', (N,N,N),dtype = np.float64)
-        f.create_dataset('w', (N,N,N),dtype = np.float64)
-        f.create_dataset('Energy_Spectrum', data = ek_arr,dtype = np.float64)
-        f.create_dataset('Flux_Spectrum', data = Pik_arr,dtype = np.float64)
-        f['u'][sx,...] = u[0]
-        f['v'][sx,...] = u[1]
-        f['w'][sx,...] = u[2]
-        f.attrs['nu'] = nu
-        f.attrs['Power input'] = f0 /TWO_PI**3
-        f.attrs['eta'] = m/(N//3)
-        f.attrs['t_eta'] = tf
-        f.attrs['forcing'] = f"Isotropic with const power input in shells {shell_no}"
-        f.attrs['N'] = N
-    
-        ndat= f.create_dataset(f'/st_{tp/tf:.3f}/n', (N,N,N),dtype = np.float64)
-        ndat[sx,...] = n
-        ndat.attrs['t_f'] = tf
-        ndat.attrs['t_p'] = tp
-        
-
-    comm.Barrier()
-    
-    # ----------- ----------------------------
-    #          Calculating and printing
-    # ----------- ----------------------------
-    eng1 = comm.allreduce(np.sum(0.5*(u[0]**2 + u[1]**2 + u[2]**2)*dx*dy*dz), op = MPI.SUM)
-    eng2 = np.sum(ek_arr)
-    nmin = comm.allreduce(np.min(n), op = MPI.MIN)
-    nmax = comm.allreduce(np.max(n), op = MPI.MAX)
-    nmean = comm.allreduce(np.sum(n), op = MPI.SUM)/N**3
-    divmax = comm.allreduce(np.max(np.abs(diff_x(u[0],  rhsu) + diff_y(u[1],rhsv) + diff_z(u[2],rhsw))),op = MPI.MAX)
-    #! Needs to be changed 
-    # # dissp = -nu*comm.allreduce(np.sum((kc**(2*lp)*(np.abs(uk[0])**2 + np.abs(uk[1])**2) +sin_to_cos( ks**(2*lp)*(np.abs(uk[2])**2/alph**2 + np.abs(bk)**2)))), op = MPI.SUM)
-    if rank == 0:
-        print( "#----------------------------","\n",f"Energy at time {t[i]} is : {eng1}, {eng2}","\n","#----------------------------")
-        print(f"Maximum divergence {divmax}")
-        print(f"n mean, max ,min : {nmean, nmax, nmin}")
-        # print( "#----------------------------","\n",f"Total dissipation at time {t[i]} is : {dissp}","\n","#----------------------------")
-    comm.Barrier()
-    return "Done!"        
-## -------------------------------------------------    
-    
+  
 ## ------------- Evolving the system ----------------- 
 def evolve_and_save(t,  u,n): 
 
@@ -573,16 +603,18 @@ def evolve_and_save(t,  u,n):
         calc_time += time() - t3
         if rank == 0:  print(f"step {i} in time {time() - t3}", end= '\r')
         ## ------------- saving the data -------------------- ##
-        if i % st ==0 : save(i,uk,n,stb)
+        if i % st ==0 : save(i,uk,n,stbs)
         ## -------------------------------------------------- ##
         t3 = time()
+        
+        
+        
         comm.Barrier()
-        
-        
-        
-        stb.coord, uknew[:],nnew[:] = RK4(t,h,stb, uk,n)
-        stb.update_intrinsic()
-        n[:] = clip_zero(nnew)
+        uknew[:],nnew[:] = RK4(t,h,stbs, uk,n)
+        comm.Barrier()
+        for j in range(len(stbs)):
+            stbs[j].update_intrinsic()
+            n[j] = clip_zero(nnew[j])
         uknew[:] = (uknew)*hypervisc
         
         # ------------------- ensuring n in non-negative ------------------- #
@@ -624,7 +656,7 @@ def evolve_and_save(t,  u,n):
         comm.Barrier()
         
     ## ---------- Saving the final data ------------
-    save(i+1, uk,n,stb)
+    save(i+1, uk,n,stbs)
     if rank ==0: print(f"average calculation time per step {calc_time/(t.size-1)}")
     ## ---------------------------------------------
 
@@ -650,9 +682,11 @@ if not forcestart:
     """Loading the data from the last time  """    
     
     paths = sorted([x for x in pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}").iterdir() if "time_" in str(x)], key=os.path.getmtime)
-    if len(paths) >0: 
-        paths = paths[-2]
+    if len(paths) >0 and not start_big_particle: 
+        # paths = paths[-2]
+        paths = paths[0]
         tinit = float(str(paths).split("time_")[-1])
+        
     else: 
         paths = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}/last")
         tinit = 0.
@@ -673,16 +707,26 @@ if not forcestart:
     u[1] = irfft_mpi(uk[1]*dealias, u[1])
     u[2] = irfft_mpi(uk[2]*dealias, u[2])
     if not start_big_particle: #! Change this to different ranks.
-        prtcl_data = np.load(paths/f"{wg}_stb_{stb0:.3f}_sts_{tps/tf:.3f}/state_{rank}")
-        stb.coord = np.zeros((prtcl_data["pos"].shape, 2*d + 1))
-        stb.coord[:,:d] = prtcl_data["pos"]
-        stb.coord[:,d:2*d] = prtcl_data["vel"]
-        stb.coord[:,-1] = prtcl_data["mass"]
-        stb.prtclid = prtcl_data["prtclid"]
-        stb.interpmat = np.zeros((stb.prtclid.shape[0], 2*d+1))
-        stb.exterpmat = np.zeros((stb.prtclid.shape[0], 1))
+        for jj in range(len(stbs)):
+            stb = stbs[jj]
+            stb0 = stb_s[jj]
+            prtcl_data = np.load(paths/f"{wg}_stb_{stb0:.3f}_sts_{tps/tf:.3f}/state_{rank}.npz")
+            stb.coord = np.zeros((prtcl_data["pos"].shape[0], stb.coord.shape[1]))
+            stb.interpmat = np.zeros((stb.coord.shape[0], stb.interpmat.shape[1]))
+            stb.coord[:,:d] = prtcl_data["pos"]
+            stb.coord[:,d:2*d] = prtcl_data["vel"]
+            stb.coord[:,-1] = prtcl_data["mass"]
+            stb.prtclid = prtcl_data["prtclid"]
+            stb.interpmat[:,:d] = prtcl_data["umat"]
+            stb.exterpmat = np.zeros((stb.prtclid.shape[0], 1))
     
-
+    else: 
+        for jj in range(len(stbs)):
+            stb = stbs[jj]
+            stb0 = stb_s[jj]
+            stb.interpmat = stb.interp_cosine(stb.coord,np.concatenate((u,u,n[jj,None,...]), axis = 0))
+            stb.coord[:,d:2*d] = stb.interpmat[:,:d]
+        
     del paths
     comm.Barrier()
     if rank ==0: print("Data loaded successfully")
@@ -734,7 +778,7 @@ if forcestart:
     u[2] = irfft_mpi(uk[2], u[2])
     
     tinit = 0.
-    n = np.ones_like(n)
+    n[:] = 1.0
     
 
 
@@ -755,8 +799,10 @@ nmax = comm.allreduce(n.max(),op =MPI.MAX)
 nmin = comm.allreduce(n.min(),op =MPI.MIN)
 if rank ==0 : print(f"Initial Physical space energy: {e0}, mean max and min of n  {nmean}, {nmax} , {nmin}")
 #-------------------------------------------------------
+for i,stb in enumerate(stbs):
+    tot_mass = comm.allreduce(np.sum(stb.coord[:,-1]),op = MPI.SUM)
+    if rank ==0: print(f"Inital mass for {stb_s[i]} stokes is {tot_mass}, with mass fraction {tot_mass/(n[i]*TWO_PI**3).mean()}, theoretical mass fraction {5/72}")
 # raise SystemExit
-
 # --------------------------------------------------
 
 ## ----- executing the code -------------------------

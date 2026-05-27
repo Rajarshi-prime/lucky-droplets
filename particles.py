@@ -2,17 +2,23 @@ import numpy as np
 from mpi4py import MPI
 from numba import njit,prange
 import math,atexit
+# from line_profiler import LineProfiler
+# profiler = LineProfiler()
+# def save_profile(profiler,rank):
+#     with open(f"profiling/rank_{rank}.txt","w") as f: profiler.print_stats(stream=f)
 
-@njit(parallel= True,fastmath = True)
+@njit(parallel= True,fastmath = {'nnan', 'ninf', 'nsz', 'arcp', 'contract'}) #! Does not approximate cos
 def _calc_usend_numba(ufield, xidx, yidx,zidx,ypos, zpos,usend, Nprtcl,N , dy , dz , cosorder , Y , Z,comp ):
 
         for p in prange(Nprtcl):   
-            for i in cosorder:
-                tempyidx = (yidx[p] + i)%N
+            for i in prange(cosorder):
+                indi = i - cosorder//2+1 
+                tempyidx = (yidx[p] + indi)%N
                 dyshift = (1 + np.cos((ypos[p] - Y[tempyidx])*(np.pi/(2*dy))))/4.0
 
-                for j in cosorder:
-                    tempzidx = (zidx[p] + j)%N
+                for j in prange(cosorder):
+                    indj = j - cosorder//2+1 
+                    tempzidx = (zidx[p] + indj)%N
                     dzshift = (1 + np.cos((zpos[p] - Z[tempzidx])*(np.pi/(2*dz))))/4.0
                     
                     for c in prange(comp):
@@ -20,30 +26,34 @@ def _calc_usend_numba(ufield, xidx, yidx,zidx,ypos, zpos,usend, Nprtcl,N , dy , 
         return usend
 
 
-@njit(parallel= True,fastmath = True)
+@njit(parallel= True,fastmath = {'nnan', 'ninf', 'nsz', 'arcp', 'contract'}) #! Does not approximate cos
 def _calc_uadd_numba_scalar(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,N,dx, dy,  dz, cosorder, Y, Z):
     
     for p in prange(Nprtcl):   
-        for i in cosorder:
-            tempyidx = (yidx[p] + i)%N
+        for i in prange(cosorder):
+            indi = i - cosorder//2+1 
+            tempyidx = (yidx[p] + indi)%N
             dyshift = (1 + np.cos((ypos[p] - Y[tempyidx])*(np.pi/(2*dy))))/4.0
 
-            for j in cosorder:
-                tempzidx = (zidx[p] + j)%N
+            for j in prange(cosorder):
+                indj = j - cosorder//2 + 1
+                tempzidx = (zidx[p] + indj)%N
                 dzshift = (1 + np.cos((zpos[p] - Z[tempzidx])*(np.pi/(2*dz))))/4.0
                 cfield[ xidx[p],tempyidx,tempzidx] += udat[p]*dyshift*dzshift/(dx*dy*dz)
     return cfield*1.0
 
-@njit(parallel= True,fastmath = True)
+@njit(parallel= True,fastmath = {'nnan', 'ninf', 'nsz', 'arcp', 'contract'}) #! Does not approximate cos
 def _calc_uadd_numba_vector(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,N,dx, dy,  dz, cosorder, Y, Z,comp):
     
     for p in prange(Nprtcl):   
-        for i in cosorder:
-            tempyidx = (yidx[p] + i)%N
+        for i in prange(cosorder):
+            indi = i - cosorder//2+1 
+            tempyidx = (yidx[p] + indi)%N
             dyshift = (1 + np.cos((ypos[p] - Y[tempyidx])*(np.pi/(2*dy))))/4.0
 
-            for j in cosorder:
-                tempzidx = (zidx[p] + j)%N
+            for j in prange(cosorder):
+                indj = j - cosorder//2+1 
+                tempzidx = (zidx[p] + indj)%N
                 dzshift = (1 + np.cos((zpos[p] - Z[tempzidx])*(np.pi/(2*dz))))/4.0
                 for c in prange(comp):
                     cfield[c, xidx[p],tempyidx,tempzidx] += udat[p,c]*dyshift*dzshift/(dx*dy*dz)
@@ -71,7 +81,7 @@ class MPI_particles:
         self.interporder = 2 #! Power of polynomial +1 
         self.nums = np.arange(self.interporder)
         self.cosorder = 4
-        self.factor = (nu*tau_eta/ (2*rho_p))**3/2 *(36*np.pi*rho_p)/M0 #! Factor connecting mass and stokes number.
+        self.factor = (nu*tau_eta/ (2*rho_p))**(1.5) *(36*np.pi*rho_p)/M0 #! Factor connecting mass and stokes number.
         self.growthfactor = 9 *np.pi*nu/(2*rho_p)
         self.decelerationfactor = (rho_p/(8*nu))**0.5
 
@@ -109,6 +119,7 @@ class MPI_particles:
         self.cosorder = np.arange(-1, 3)
 
         # --------------------------------------------------------------- #
+        # atexit.register(save_profile,profiler,self.rank)
     
     def to_interp(self,interpdim):
         """ The input should be the field variable and the number of components:
@@ -142,6 +153,7 @@ class MPI_particles:
         # ----------------------------------------------------------------- #    
         
         
+    #@profiler
     def calc_usend(self,ufield, coordrecv):
         Nprtcl = coordrecv.shape[0]
         usend = np.zeros((Nprtcl,self.interpdim))
@@ -153,10 +165,11 @@ class MPI_particles:
             zpos = coordrecv[:,-1]
             Npass = ufield.shape[-1]
             
-            return _calc_usend_numba(ufield, xidx, yidx,zidx,ypos, zpos,usend, Nprtcl,Npass, self.dy , self.dz, self.cosorder , self.Y , self.Z,self.interpdim)
-        
+            return _calc_usend_numba(ufield, xidx, yidx,zidx,ypos, zpos,usend, Nprtcl,Npass, self.dy , self.dz, self.cosorder.size , self.Y , self.Z,self.interpdim)
+
         else: return usend
         
+    #@profiler
     def calc_uadd_scalar(self,cfield,coordrecv):
         Nprtcl = coordrecv.shape[0]
         if Nprtcl > 0: 
@@ -168,9 +181,10 @@ class MPI_particles:
             udat = coordrecv[:,self.d]
             Npass = cfield.shape[-1]
             
-            return _calc_uadd_numba_scalar(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,Npass,self.dx, self.dy,  self.dz, self.cosorder, self.Y, self.Z)   
-        else: return cfield*1.0
-
+            return _calc_uadd_numba_scalar(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,Npass,self.dx, self.dy,  self.dz, self.cosorder.size, self.Y, self.Z)   
+        else:
+            return cfield*1.0
+    #@profiler
     def calc_uadd_vector(self,cfield,coordrecv):
         Nprtcl = coordrecv.shape[0]
         if Nprtcl > 0: 
@@ -182,7 +196,9 @@ class MPI_particles:
             udat = coordrecv[:,self.d:self.d + self.exterpdim]
             Npass = cfield.shape[-1]
             
-            return _calc_uadd_numba_vector(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,Npass,self.dx, self.dy,  self.dz, self.cosorder, self.Y, self.Z,self.exterpdim)   
+            return _calc_uadd_numba_vector(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,Npass,self.dx, self.dy,  self.dz, self.cosorder.size, self.Y, self.Z,self.exterpdim)   
+            
+
         else: return cfield*1.0
 
     
@@ -194,7 +210,7 @@ class MPI_particles:
         self.st = (self.coord[:,-1]/self.factor)**(2/3.)
         self.rhs = 0.0*self.coord
         
-    
+    #@profiler
     def particle_exchange(self,coord):
         """Change it to all to all v at a later time"""
         outcond = (coord[:,0] < self.startdom) + (coord[:,0] >= self.enddom) #! The index before which the particles are to be sent
@@ -227,9 +243,16 @@ class MPI_particles:
 
         coord = np.concatenate((coord[cond],recvbuf),axis = 0)
         coord[:,:self.d] %= self.L
-
+        
+        # ------------------- cleaning up ------------------- #
+        self.comm.Barrier()
+        del outcond,cond, sendbuf,recvbuf
+        # gc.collect()
+        # --------------------------------------------------- #
+        
         return coord
-
+    
+    #@profiler
     def send(self,x,args):
         "Input: x, args = [y,z,....] where y,z are the additional arguments to be sent to the next process"
         outcond = (x[:,0] < self.startdom) + (x[:,0] >= self.enddom) #! The index before which the particles are to be sent
@@ -249,11 +272,8 @@ class MPI_particles:
         
         
         sendbuf = sendbuf[(sendbuf[:,0]%self.L).argsort()]
-        sendcounts = np.zeros(self.num_process, dtype = np.int32)
-        
-        for i in range(self.num_process):
-            sendcounts[i] = np.sum(((sendbuf[:,0]%self.L)>=self.glob_startdom[i])*(((sendbuf[:,0]%self.L)< self.glob_enddom[i])))*cdim
-        
+        sendcounts = (np.round(np.searchsorted(sendbuf[:,0]%self.L,self.glob_enddom,side = 'left')-np.searchsorted(sendbuf[:,0]%self.L,self.glob_startdom,side = 'left'))*cdim).astype(np.int32)
+
         sendbuf = sendbuf.ravel()
 
         sdispls = [0] + list(np.cumsum(sendcounts)[:-1]) 
@@ -272,6 +292,11 @@ class MPI_particles:
             args[i] = np.concatenate((args[i][cond],recvbuf[:,count:count + args[i].shape[-1]]),axis = 0)
             count += args[i].shape[-1]
             
+        # ------------------- cleaning up ------------------- #
+        self.comm.Barrier()
+        del outcond,cond, sendbuf,recvbuf
+        # gc.collect()
+        # --------------------------------------------------- #
         return x,args
     
     
@@ -430,8 +455,7 @@ class MPI_particles:
         return self.interpmat
     
     
-    
-
+    #@profiler
     def interp_cosine(self,coord,u):
         """Interpolates the u field at the location of the particle.
         If the particle is at the edge of the domain, it gets data from the neighboring domains. 
@@ -473,7 +497,7 @@ class MPI_particles:
             coordrecv = np.zeros(sum(recvcounts),dtype = np.float64)
             rdispls = [0] + list(np.cumsum(recvcounts)[:-1])
             self.cart_comm.Neighbor_alltoallv([coordsend, sendcounts,sdispls, MPI.DOUBLE],[coordrecv,recvcounts,rdispls,MPI.DOUBLE])
-            
+            del coordsend
             
             # Recieve the xidx,yidx list
             coordrecv = coordrecv.reshape((-1,cdim))
@@ -487,7 +511,7 @@ class MPI_particles:
             # usend = np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,:,None],zidxshift[...,None,:]],dyshift,dzshift), [0,1],[1,0]).ravel() # (Nprtcl,d) matrix, d is the components of u.
             # # send the reduced u
             usend = self.calc_usend(u,coordrecv).ravel()
-            
+            del coordrecv
             sendcounts = np.round(recvcounts*self.interpdim/cdim).astype(np.int32)
             sdispls = [0] + list(np.cumsum(sendcounts)[:-1])
             recvcounts = np.zeros(self.nneighbors*2,dtype = 'i')
@@ -497,20 +521,31 @@ class MPI_particles:
             self.cart_comm.Neighbor_alltoallv([usend, sendcounts,sdispls, MPI.DOUBLE],[urecv,recvcounts,rdispls,MPI.DOUBLE])
             # Receive u form the matrix
             urecv = urecv.reshape((-1,self.interpdim))
-
+            del usend
+            
             # Add to the value
 
 
             self.interpmat[outcond.nonzero()[0][sortarg]] += urecv*dxshift[outcond.nonzero()[0][sortarg],None]
-
+            del urecv,sortarg
                 
             
             # self.interpmat[cond]  += np.moveaxis(np.einsum('...jqr,jq,jr->...j',u[...,slx[cond,None,None], sly[cond,:.None],slz[cond,None,:]],dyshift_core[cond],dzshift_core[cond]), [0,1],[1,0])*dxshift[cond,None]
-            self.interpmat[cond] += self.calc_usend(u,np.concatenate((slx[cond,None],idx[cond,1:],pos[cond,1:]),axis = 1))*dxshift[cond,None]    
-
+            coordrecv = np.concatenate((slx[cond,None],idx[cond,1:],pos[cond,1:]),axis = 1)
+            self.interpmat[cond] += self.calc_usend(u,coordrecv)*dxshift[cond,None]    
+            # ------------------- cleaning up ------------------- #
+            del cond,outcond,dxshift,slx,coordrecv
+            # gc.collect()
+            # --------------------------------------------------- #
+        
+        # ------------------- cleaning up ------------------- #
+        self.comm.Barrier()
+        del pos,idx
+        # gc.collect()
+        # --------------------------------------------------- #
         return self.interpmat
     
-
+    #@profiler
     def exterp_cosine_scalar(self,coord,c):
         """Adds exterpmat to the existing c"""
         
@@ -520,11 +555,11 @@ class MPI_particles:
         order = 4
         c *= 0.0
         
-        sly = (idx[:,1,None] + self.cosorder)%self.N
-        slz = (idx[:,2,None] + self.cosorder)%self.N
+        # sly = (idx[:,1,None] + self.cosorder)%self.N
+        # slz = (idx[:,2,None] + self.cosorder)%self.N
 
-        dyshift_core = (1 + np.cos((pos[:,-2,None] - self.Y[sly])*(np.pi/(2*self.dy))))/4.0
-        dzshift_core = (1 + np.cos((pos[:,-1,None] - self.Z[slz])*(np.pi/(2*self.dz))))/4.0
+        # dyshift_core = (1 + np.cos((pos[:,-2,None] - self.Y[sly])*(np.pi/(2*self.dy))))/4.0
+        # dzshift_core = (1 + np.cos((pos[:,-1,None] - self.Z[slz])*(np.pi/(2*self.dz))))/4.0
         
         for i in range(order):
             slx = (idx[:,0]-order//2+1 + i)
@@ -550,7 +585,7 @@ class MPI_particles:
             coordrecv = np.zeros(sum(recvcounts),dtype = np.float64)
             rdispls = [0] + list(np.cumsum(recvcounts)[:-1])
             self.cart_comm.Neighbor_alltoallv([coordsend, sendcounts,sdispls, MPI.DOUBLE],[coordrecv,recvcounts,rdispls,MPI.DOUBLE])
-
+            del coordsend,sortarg
             
             # ------------------- Recieve the u shape ------------------ #
             coordrecv = coordrecv.reshape((-1,cdim))
@@ -567,12 +602,26 @@ class MPI_particles:
             # dzshift = (1 + np.cos((coordrecv[:,-1,None] - self.Z[zidxshift])*(np.pi/(2*self.dz))))/4.0
             # np.add.at(c,(...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None],zidxshift[...,None,:]),coordrecv[:,self.d][:,None,None]*dyshift[...,None]*dzshift[...,None,:]/(self.dx *self.dy *self.dz))
             c[:] = self.calc_uadd_scalar(c,coordrecv)
-            
+            del coordrecv
             # ---------------------------------------------------------------------- #
             
             # np.add.at(c,(...,slx[cond,None,None], sly[cond,:,None],slz[cond,None,:]),(self.exterpmat[cond,0]*dxshift[cond])[:,None,None]*dyshift_core[cond,:,None]*dzshift_core[cond,None,:]/(self.dx *self.dy *self.dz))
+            coordrecv = np.concatenate((slx[cond,None],idx[cond,1:],self.exterpmat[cond]*dxshift[cond,None],pos[cond,1:]),axis = 1)
+            c[:] = self.calc_uadd_scalar(c,coordrecv)
+        
             
-            c[:] = self.calc_uadd_scalar(c,np.concatenate((slx[cond,None],idx[cond,1:],self.exterpmat[cond]*dxshift[cond,None],pos[cond,1:]),axis = 1))
+            # ------------------- cleaning up ------------------- #
+            
+            del slx, dxshift,outcond, cond
+            # gc.collect()
+            # --------------------------------------------------- #
+            
+        
+        # ------------------- cleaning up ------------------- #
+        self.comm.Barrier()
+        del pos, idx
+        # gc.collect()
+        # --------------------------------------------------- #
         
         return c
         
@@ -615,7 +664,7 @@ class MPI_particles:
             coordrecv = np.zeros(sum(recvcounts),dtype = np.float64)
             rdispls = [0] + list(np.cumsum(recvcounts)[:-1])
             self.cart_comm.Neighbor_alltoallv([coordsend, sendcounts,sdispls, MPI.DOUBLE],[coordrecv,recvcounts,rdispls,MPI.DOUBLE])
-            
+            del coordsend, outcond, sortarg
             # ------------------- Recieve the u shape ------------------ #
             coordrecv = coordrecv.reshape((-1,cdim))
             coordrecv[:,0] %= self.Np
@@ -631,12 +680,25 @@ class MPI_particles:
             # np.add.at(c,(...,coordrecv[:,0,None,None].astype(np.int32), yidxshift[...,None],zidxshift[...,None,:]),np.moveaxis(coordrecv[:,self.d:self.d+ccomp],[0,1],[1,0])[...,None,None]*dyshift[...,None]*dzshift[...,None,:])
             
             c[:] = self.calc_uadd_vector(c,coordrecv)
+            del coordrecv
             # ----------------------------------------------------------------------------------------------- #     
             
             # np.add.at(c,(...,slx[cond,None,None], sly[cond,:,None],slz[cond,None,:]),np.moveaxis(self.exterpmat[cond]*dxshift[cond,None],[0,1],[1,0])[...,None,None]*dyshift_core[None, cond,:,None]*dzshift_core[None,cond,None,:])
+            coordrecv = np.concatenate((slx[cond,None],idx[cond,1:],self.exterpmat[cond]*dxshift[cond,None],pos[cond,1:]),axis = 1)
+            c[:] = self.calc_uadd_vector(c,coordrecv)
+        
+            # ------------------- cleaning up ------------------- #
+            del slx, dxshift, cond
+            # gc.collect()
+            # --------------------------------------------------- #
             
-            c[:] = self.calc_uadd_vector(c,np.concatenate((slx[cond,None],idx[cond,1:],self.exterpmat[cond]*dxshift[cond,None],pos[cond,1:]),axis = 1))
-            
+        
+        # ------------------- cleaning up ------------------- #
+        self.comm.Barrier()
+        del pos, idx
+        # gc.collect()
+        # --------------------------------------------------- #
+          
         return c
 
     def interp_exterp_cosine_scalar(self,coord,u, c):
@@ -827,6 +889,7 @@ class MPI_particles:
         
         self.exterpmat[:,0] = self.growthfactor*(1 + (self.st_s/self.st)**0.5)**2 * self.interpmat[:,-1]*np.linalg.norm(coord[:,self.d:self.d*2] - self.interpmat[:,self.d: 2*self.d],axis = 1) #! exterpmat is mdot normalized by M0.
         fc[:] = self.exterp_cosine_scalar(coord, fc)
+
         
         self.rhs[:,:self.d] = coord[:,self.d:2*self.d]
         self.rhs[:,self.d:2*self.d] =  (self.interpmat[:,:self.d]- coord[:,self.d:2*self.d])/(self.st[:,None] *self.tau_eta)  
