@@ -31,6 +31,8 @@ else : isexplicit = 0.
 ## ------------- Time steps --------------
 N = 256
 dt =  0.2*0.256/N #! Such that increasing resolution will decrease the dt
+dtmax = 5*0.256/N
+dtmin = 0.2*0.256/N
 T = 20
 dt_save = 0.1
 st = round(dt_save/dt) #!Savestep : Confusing
@@ -499,7 +501,7 @@ def load_hdf5(paths, u, n,tps =tps, tf = tf):
     
     return u,n
 
-def save(i,uk,n,stbs,tf = tf, tps = tps): 
+def save(i,tt,uk,n,stbs,tf = tf, tps = tps): 
     # return None
     # div = diff_x(u[0], rhsu) + diff_y(u[1],rhsv) + diff_z(u[2],rhsw)
     # if rank == 0: print(f"Rank {rank} has divergence {np.sum(np.abs(div))}")
@@ -521,7 +523,7 @@ def save(i,uk,n,stbs,tf = tf, tps = tps):
     # ----------- ----------------------------
     #                 Saving the data (field)
     # ----------- ----------------------------
-    if (Nprtcl > 0).any(): new_dir = savePath/f"time_{t[i]:.1f}"
+    if (Nprtcl > 0).any(): new_dir = savePath/f"time_{tt:.1f}"
     else: new_dir = savePath/f"last"
     try: new_dir.mkdir(parents=True,  exist_ok=True)
     except FileExistsError: pass
@@ -573,7 +575,7 @@ def save(i,uk,n,stbs,tf = tf, tps = tps):
     #! Needs to be changed 
     # # dissp = -nu*comm.allreduce(np.sum((kc**(2*lp)*(np.abs(uk[0])**2 + np.abs(uk[1])**2) +sin_to_cos( ks**(2*lp)*(np.abs(uk[2])**2/alph**2 + np.abs(bk)**2)))), op = MPI.SUM)
     if rank == 0:
-        print( "#----------------------------","\n",f"Energy at time {t[i]} is : {eng1}, {eng2}","\n","#----------------------------")
+        print( "#----------------------------","\n",f"Energy at time {tt} is : {eng1}, {eng2}","\n","#----------------------------")
         print(f"Maximum divergence {divmax}")
         print(f"n mean, max ,min : {nmean, nmax, nmin}")
         # print( "#----------------------------","\n",f"Total dissipation at time {t[i]} is : {dissp}","\n","#----------------------------")
@@ -598,25 +600,34 @@ def evolve_and_save(t,  u,n):
     uk[0] = rfft_mpi(u[0], uk[0])*dealias
     uk[1] = rfft_mpi(u[1], uk[1])*dealias
     uk[2] = rfft_mpi(u[2], uk[2])*dealias
-    
-    for i in range(t.size-1):
+    i = 0.0
+    tt = 0.0
+    h = dtmin
+    # for i in range(t.size-1):
+    while tt <= t[-1]:
+
         calc_time += time() - t3
         if rank == 0:  print(f"step {i} in time {time() - t3}", end= '\r')
         ## ------------- saving the data -------------------- ##
-        if i % st ==0 : save(i,uk,n,stbs)
+        if abs(np.sin(tt/dt_save*PI)) - np.sin(0.5*h/dt_save*PI) < 1e-12:
+            save(i,tt,uk,n,stbs)
         ## -------------------------------------------------- ##
         t3 = time()
         
         
         
         comm.Barrier()
-        uknew[:],nnew[:] = RK4(t,h,stbs, uk,n)
+        uknew[:],nnew[:] = RK4(tt,h,stbs, uk,n)
         comm.Barrier()
+        hnew = dtmax
         for j in range(len(stbs)):
             stbs[j].update_intrinsic()
+            stmin = comm.allreduce(np.min(stbs[j].st),op = MPI.MIN)
+            hnew = min(hnew,0.1*stmin)
             n[j] = clip_zero(nnew[j])
         uknew[:] = (uknew)*hypervisc
-        
+        h = hnew
+        if rank==0: print(f"For next step h : {h}")
         # ------------------- ensuring n in non-negative ------------------- #
 
         # pk[:] = rfft_mpi(n,pk)*dealias
@@ -654,9 +665,10 @@ def evolve_and_save(t,  u,n):
         
         
         comm.Barrier()
-        
+        i += 1
+        tt += h
     ## ---------- Saving the final data ------------
-    save(i+1, uk,n,stbs)
+    save(i+1,tt, uk,n,stbs)
     if rank ==0: print(f"average calculation time per step {calc_time/(t.size-1)}")
     ## ---------------------------------------------
 
