@@ -68,7 +68,8 @@ class MPI_particles:
         self.dx = X[1] - X[0]
         self.dy = Y[1] - Y[0]
         self.dz = Z[1] - Z[0]
-        
+        self.M0 = M0
+        self.rhop = rho_p
         self.rank = comm.Get_rank()
         self.num_process =  comm.Get_size()
         self.Np = self.N//self.num_process
@@ -209,6 +210,7 @@ class MPI_particles:
         
         self.st = (self.coord[:,-1]/self.factor)**(2/3.)
         self.rhs = 0.0*self.coord
+        self.rb = (self.coord[:,-1]*self.M0*(0.75/np.pi))**(1./3.)
         
     #@profiler
     def particle_exchange(self,coord):
@@ -898,6 +900,51 @@ class MPI_particles:
         self.rhs[:,-1] = self.exterpmat[:,0]
         
         return sump, self.rhs, fc
+        
+        
+    def pRHS_inertial(self,t,coord,u,sump):
+        """
+        Evolves the step from t to t + h using Euler. Returns the sump, dot{coord}. 
+        """
+
+        coord,[self.coord, self.interpmat,self.prtclid,sump] = self.send(coord,[self.coord, self.interpmat,self.prtclid,sump])
+        self.st = (coord[:,-1]/self.factor)**(2/3.)
+        self.rhs = 0.0*coord
+        
+        self.interpmat = self.interp_cosine(coord,u) #! Interpmat has u => d components.
+        
+
+        
+        self.rhs[:,:self.d] = coord[:,self.d:2*self.d]
+        self.rhs[:,self.d:2*self.d] =  (self.interpmat[:,:self.d]- coord[:,self.d:2*self.d])/(self.st[:,None] *self.tau_eta)  
+        
+        self.rhs[:,2*self.d - 1] -= self.g #! Adding gravity in the appropriate units.
+        return sump, self.rhs
+    
+    
+    def stoch_updt(self,dt,t,coord,us,nprtcl,rs):
+        """
+        Evolves the step from t to t + h using stochastic Euler. Returns the modified coord which is the stochastically evolved coord. Uses the original evolved state
+        """
+
+        coord,[self.coord, self.interpmat,self.prtclid] = self.send(coord,[self.coord, self.interpmat,self.prtclid])
+        self.st = (coord[:,-1]/self.factor)**(2/3.)
+        self.rb = (coord[:,-1]*self.M0*(0.75/np.pi))**(1./3.)
+        self.rhs = 0.0*coord
+
+        self.interpmat = self.interp_cosine(coord,us) #! Interpmat has u => d components.
+
+        volume = np.pi*(self.rb + rs)**2*np.linalg.norm(coord[:,self.d:2*self.d]  - self.interpmat,axis = -1)*dt
+        plambda = nprtcl/(2*np.pi)**3*volume
+        ncoll = np.random.poisson(plambda,size = coord.shape[0])
+        nprtcl -= ncoll.sum() 
+        # print(volume.mean(),self.dx**3)
+        ms = self.rhop*np.pi*(rs)**3*(4.0/3.0)
+        
+        self.rhs[:,-1] = ncoll*ms/self.M0 #! This is delta m / M0
+        self.rhs[:,self.d:2*self.d] =  (self.rhs[:,-1]/(coord[:,-1] + self.rhs[:,-1]))[:,None]*(self.interpmat - coord[:,self.d:2*self.d]  )
+
+        return  coord + self.rhs
 
     
 def RK4(t,h,prtcl, u,us,c):
