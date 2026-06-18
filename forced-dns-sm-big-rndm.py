@@ -46,7 +46,7 @@ if rank ==0: print(f"Stokes numbers:{stb_s}, number of particles : {Nprtcl}")
 # if rank ==0 : print(f"prtcl per rank : {Nprtcl//num_process}")
 # raise SystemExit 
 d = 3
-M0 = 7.2e-4 #2.6\mu m particles with volfrac 1e-6.
+M0 = 7.2e-1 #2.6\mu m particles with volfrac 1e-3.
 rsdim = 2.7*1e-6/2.0 #! radius of small particles in meter 
 rhop = 1000
 
@@ -134,7 +134,7 @@ param["interval of saving indices"] = st
 # savePath = pathlib.Path(f"/home/rajarshi.chattopadhyay/python/3D-DNS/data/samriddhi-tests-euler-spherical-dealias-final/N_{N}")
 re = 1/nu if nu !=0 else "inf"
 loadPath = pathlib.Path(f"./data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}")
-savePath = pathlib.Path(f"./data_cosine/forced_{isforcing}/stochastic/N_{N}_Re_{re:.1f}")
+savePath = pathlib.Path(f"./data_cosine/forced_{isforcing}/stochastic/correlated/N_{N}_Re_{re:.1f}")
 
 if rank == 0:
     print(savePath)
@@ -170,7 +170,7 @@ rb0s = []
 for i,stb in enumerate(stb_s):
 
     stbs.append(MPI_particles(comm, L, N, Nprtcl[i],sts, stb,g,nu, tf,rhop,M0 ,d,X,Y,Z, x,y,z))
-    stbs[i].to_interp(d) # u or v_s
+    stbs[i].to_interp(d+1) # u and modA
     stbs[i].update_intrinsic()
     rb0s.append(stbs[i].rb[0])
     nprtcls.append(M0/rhop*(TWO_PI)**3/(4./3.*PI*(rs)**3))
@@ -182,12 +182,14 @@ u  = np.zeros((3, Np, N, N), dtype= np.float64)
 v  = np.zeros((3, Np, N, N), dtype= np.float64)
 
 omg= np.zeros((3, Np, N, N), dtype= np.float64)
+A= np.zeros((3, 3, Np, N, N), dtype= np.float64)
+normA= np.zeros(( Np, N, N), dtype= np.float64)
 
 
 
 uk = np.zeros((3, N, Np, Nf), dtype= np.complex128)
 vk = np.zeros((3, N, Np, Nf), dtype= np.complex128)
-
+Ak = np.zeros((3, 3, N, Np, Nf), dtype= np.complex128)
 pk = uk[0].copy()
 
 ek = np.zeros_like(pk, dtype = np.float64)
@@ -382,9 +384,21 @@ def full_RHS(t,uk,sump, tempcoord, stbs,ku =ku,visc = 1,forc = 1,kps = kps):
     return ku,kps,sump
 
     
-def RK4(t,h,stbs, uk,uknew = uknew,sump = sump, tempcoord = tempcoord,kps = kps):
+def RK4(t,h,stbs, uk,uknew = uknew,sump = sump, tempcoord = tempcoord,kps = kps,normA = normA):
     """Template on how to evolve the particle + flow system"""
     uknew[:] = 1.0*uk  
+    Ak[:,0] = 1j*kx[None,:]*uk
+    Ak[:,1] = 1j*ky[None,:]*uk
+    Ak[:,2] = 1j*ky[None,:]*uk
+    for ii in range(d):
+        for jj in range(d):
+            A[ii,jj] = irfft_mpi(Ak[ii,jj]*dealias,A[ii,jj])
+            
+    
+    normA[:] = np.einsum('ij...,ij...->...', A,A)
+    meannorm = comm.allreduce(np.sum(normA),op = MPI.SUM)/N**3
+    normA /= meannorm
+
     for j in range(len(stbs)):
         sump[j] = stbs[j].coord*1.0
         tempcoord[j] = stbs[j].coord*1.0
@@ -402,8 +416,7 @@ def RK4(t,h,stbs, uk,uknew = uknew,sump = sump, tempcoord = tempcoord,kps = kps)
     # ----------------------------------------------------------------------- #
     
     for j in range(len(stbs)): 
-        sump[j] = stbs[j].stoch_updt(h,t,sump[j],v,nprtcls[j],rs)
-        
+        sump[j] = stbs[j].stoch_updt(h,t,sump[j],v,normA,nprtcls[j],rs)
         
         sump[j] += h/6.0*kps[j]
         tempcoord[j] = stbs[j].coord + h/2 *kps[j]
@@ -530,7 +543,7 @@ def save(i,tt,uk,stbs,tf = tf, tps = tps):
             stb = stbs[jj]
             stb.coord,[stb.interpmat,stb.prtclid] = stb.send(stb.coord,[stb.interpmat,stb.prtclid])
             stb.st = (stb.coord[:,-1]/stb.factor)**(2/3.)
-            stb.interpmat = stb.interp_cosine(stb.coord,u)
+            stb.interpmat = stb.interp_cosine(stb.coord,np.concatenate((u,u[0][None,:]),axis = 0))
             np.savez_compressed(new_dir_b/f"state_{rank}.npz",pos= stb.coord[:,:d],vel = stb.coord[:,d:2*d], mass = stb.coord[:,-1],prtclid = stb.prtclid, umat = stb.interpmat[:,:d])
         
         
@@ -706,7 +719,7 @@ if not forcestart:
         for jj in range(len(stbs)):
             stb = stbs[jj]
             stb0 = stb_s[jj]
-            stb.interpmat = stb.interp_cosine(stb.coord,u)
+            stb.interpmat = stb.interp_cosine(stb.coord,np.concatenate((u,u[0][None,:]),axis = 0))
             stb.coord[:,d:2*d] = stb.interpmat[:,:d]
         
     del paths

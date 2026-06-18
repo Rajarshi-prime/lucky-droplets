@@ -910,8 +910,9 @@ class MPI_particles:
         coord,[self.coord, self.interpmat,self.prtclid,sump] = self.send(coord,[self.coord, self.interpmat,self.prtclid,sump])
         self.st = (coord[:,-1]/self.factor)**(2/3.)
         self.rhs = 0.0*coord
-        
-        self.interpmat = self.interp_cosine(coord,u) #! Interpmat has u => d components.
+
+        self.interpmat = self.interp_cosine(coord,np.concatenate((u,u[0][None,:]),axis = 0)) #! Interpmat has u => d+1 components.
+        # self.interpmat = self.interp_cosine(coord,np.concatenate(u,u[0][None,...],axis = 0)) #! Interpmat has u => d components.
         
 
         
@@ -922,7 +923,7 @@ class MPI_particles:
         return sump, self.rhs
     
     
-    def stoch_updt(self,dt,t,coord,us,nprtcl,rs):
+    def stoch_updt(self,dt,t,coord,us,modA, nprtcl,rs):
         """
         Evolves the step from t to t + h using stochastic Euler. Returns the modified coord which is the stochastically evolved coord. Uses the original evolved state
         """
@@ -931,18 +932,18 @@ class MPI_particles:
         self.st = (coord[:,-1]/self.factor)**(2/3.)
         self.rb = (coord[:,-1]*self.M0*(0.75/np.pi))**(1./3.)
         self.rhs = 0.0*coord
+        
+        self.interpmat = self.interp_cosine(coord,np.concatenate((us,modA[None,...]), axis = 0)) #! Interpmat has u => d components.
 
-        self.interpmat = self.interp_cosine(coord,us) #! Interpmat has u => d components.
-
-        volume = np.pi*(self.rb + rs)**2*np.linalg.norm(coord[:,self.d:2*self.d]  - self.interpmat,axis = -1)*dt
-        plambda = nprtcl/(2*np.pi)**3*volume
-        ncoll = np.random.poisson(plambda,size = coord.shape[0])
+        volume = np.pi*(self.rb + rs)**2*np.linalg.norm(coord[:,self.d:2*self.d]  - self.interpmat[:,:self.d],axis = -1)*dt
+        plambda = nprtcl/(2*np.pi)**3*volume*self.interpmat[:,-1]
+        ncoll = np.random.poisson(plambda)
         nprtcl -= ncoll.sum() 
         # print(volume.mean(),self.dx**3)
         ms = self.rhop*np.pi*(rs)**3*(4.0/3.0)
         
         self.rhs[:,-1] = ncoll*ms/self.M0 #! This is delta m / M0
-        self.rhs[:,self.d:2*self.d] =  (self.rhs[:,-1]/(coord[:,-1] + self.rhs[:,-1]))[:,None]*(self.interpmat - coord[:,self.d:2*self.d]  )
+        self.rhs[:,self.d:2*self.d] =  (self.rhs[:,-1]/(coord[:,-1] + self.rhs[:,-1]))[:,None]*(self.interpmat[:,:self.d] - coord[:,self.d:2*self.d]  )
 
         return  coord + self.rhs
 
