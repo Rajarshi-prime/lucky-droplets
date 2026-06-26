@@ -8,7 +8,7 @@ from scipy.fft import fftfreq,rfftn, irfftn
 N =256
 num_process = 256
 Np = N//num_process
-datapath = lambda t,sts,stb: pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/stochastic/N_256_Re_1003.2/time_{t:.1f}/wo_g_sts_{sts:.3f}_stb_{stb:.3f}")
+datapath = lambda t,sts,stb: pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/stochastic/correlated/N_256_Re_1003.2/time_{t:.1f}/wo_g_sts_{sts:.3f}_stb_{stb:.3f}")
 sts = 0.001
 stb_s = [0.017,0.017/4, 0.017*4,0.017*6.35]
 stb_s.sort()
@@ -60,7 +60,7 @@ def e3d_to_e1d(x):  return np.histogram(k.ravel(),bins = shells,weights=x.ravel(
 # plt.colorbar(p1)
 
 #%%
-prtcl_path = lambda t,stb: pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/stochastic/N_256_Re_1003.2/time_{t:.1f}/wo_g_stb_{stb:.3f}_sts_0.001/")
+prtcl_path = lambda t,stb: pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/stochastic/correlated/N_256_Re_1003.2/time_{t:.1f}/wo_g_stb_{stb:.3f}_sts_0.001/")
 times = [float(i.split("_")[-1]) for i in os.listdir(prtcl_path(0,stb_s[0]).parent.parent) if "time_" in i]
 times.sort()
 times = np.array(times)
@@ -186,7 +186,7 @@ xscale = 'none'
 plt.figure(figsize = (6,4.5), dpi = 200)
 for kk,stb in enumerate(stb_s):
     # plt.plot(times, sample_traj[kk],'--',alpha = 0.2,color = cols[kk])
-    plt.fill_between(times,-std_mass[kk]+tot_mass[kk]/(tot_mass[kk][0]) ,std_mass[kk]+tot_mass[kk]/(tot_mass[kk][0]),color = cols[kk],alpha = 0.3,lw = 0)
+    plt.fill_between(times,-std_mass[kk]+tot_mass[kk]/(tot_mass[kk][0]) ,std_mass[kk]+tot_mass[kk]/(tot_mass[kk][0]),color = cols[kk],alpha = 0.3,lw = 0) 
 
     plt.plot(times, tot_mass[kk]/(tot_mass[kk][0]),'-',color = cols[kk],label = fr'${stb:.3f}$')
 
