@@ -350,9 +350,9 @@ def full_RHS(t,uk, n,sump, tempcoord, stbs,ku =ku,kn = kn,fc = fc,visc = 1,forc 
     
     
     
-    rhsuk += (rfft_mpi(rhsu, pk) )*dealias*0.5 + fk[0]*dealias
-    rhsvk += (rfft_mpi(rhsv, pk) )*dealias*0.5 + fk[1]*dealias
-    rhswk += (rfft_mpi(rhsw, pk) )*dealias*0.5 + fk[2]*dealias  
+    rhsuk += (rfft_mpi(rhsu, pk) )*dealias*0.5 
+    rhsvk += (rfft_mpi(rhsv, pk) )*dealias*0.5 
+    rhswk += (rfft_mpi(rhsw, pk) )*dealias*0.5 
     
     ## The pressure term
     pk[:] = 1j*invlap  * (kx*rhsuk + ky*rhsvk + kz*rhswk)
@@ -360,9 +360,9 @@ def full_RHS(t,uk, n,sump, tempcoord, stbs,ku =ku,kn = kn,fc = fc,visc = 1,forc 
     
 
     ## The RHS term with the pressure   
-    ku[0] = rhsuk - 1j*kx*pk - nu*((-lap)**lp)*uk[0]*isexplicit * visc
-    ku[1] = rhsvk - 1j*ky*pk - nu*((-lap)**lp)*uk[1]*isexplicit * visc
-    ku[2] = rhswk - 1j*kz*pk - nu*((-lap)**lp)*uk[2]*isexplicit * visc
+    ku[0] = rhsuk - 1j*kx*pk - nu*((-lap)**lp)*uk[0]*isexplicit * visc + fk[0]*dealias
+    ku[1] = rhsvk - 1j*ky*pk - nu*((-lap)**lp)*uk[1]*isexplicit * visc + fk[1]*dealias
+    ku[2] = rhswk - 1j*kz*pk - nu*((-lap)**lp)*uk[2]*isexplicit * visc + fk[2]*dealias  
     
     #the rhs for the number density
     vk[0] = uk[0] - tps*(ku[0] - rhsuk)*dealias #! DuDt =  ku - nonlinear part.

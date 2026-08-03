@@ -111,7 +111,7 @@ eta_dim = 0.6*1e-3 #! Kolmogorov length scale in meter in clouds
 tau_eta_dim = 0.03 #! #! Kolmogorov time scale in seconds in clouds.
 g = 9.81*(tau_eta_dim**2/eta_dim)*(eta/tf**2) if gravity else 0 # Gravity in the simulation units
 # rs = rsdim/eta_dim*eta #! radius of small particles in simulation units
-rs = ((9/(2*rhop))*eta**2/sts)**0.5 #! radius of small particles in simulation units
+rs = eta*((9/(2*rhop))/sts)**0.5 #! radius of small particles in simulation units
 #* if the eta corresponds to 0.6 mm, then the Stokes of the small particles of 2.7 microns diameter is 0.001.
 
 #----  Kolmogorov length scale - \eta \epsilon etc...---------
@@ -175,7 +175,7 @@ for i,stb in enumerate(stb_s):
     stbs[i].to_interp(d+1) # u and modA
     stbs[i].update_intrinsic()
     rb0s.append(stbs[i].rb[0])
-    nprtcls.append(M0/rhop*(TWO_PI)**3/(4./3.*PI*(rs)**3))
+    nprtcls.append(3.0* M0*(TWO_PI)**3/(rhop*4.*PI*(rs)**3))
     # stbs[i].to_exterp(1)
 
 if rank ==0: print(f"Small Stokes number :{sts}, Large Stokes numbers :{stb_s}, Number of big particles : {Nprtcl}, Number of small particles: {np.log10(np.array(nprtcls))}, Radius of small particles : {rs}, Radius of big particles : {rb0s}, Length of the box is {eta_dim/eta*TWO_PI} m")

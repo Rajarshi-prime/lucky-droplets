@@ -29,7 +29,7 @@ else : isexplicit = 0.
 N = 256
 dt =  0.256/N #! Such that increasing resolution will decrease the dt
 T = 40
-dt_save = 0.5
+dt_save = 0.05
 st = round(dt_save/dt) #!Savestep : Confusing
 sts = 0.001
 Nprtcl = 0
@@ -287,11 +287,14 @@ def forcing(uk,fk):
     
      
 def clip_error(x):
-    """Clips negative values to zero and rescales the to conserve the mean
     """
-    oldmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
-    upperlim = np.log(nmaxfactor*oldmean)
-    x[:] = np.clip(x,-25.5,upperlim) #! Clipping the log value to 1e-10 below and nmaxfactor*mean above.
+    Clips the values to the upper and lower limit of the threshold
+    """
+    # oldmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
+    oldmean = comm.allreduce(np.sum((10.0)**x/N**3),op = MPI.SUM)
+    upperlim = np.log10(oldmean) + np.log10(nmaxfactor)
+
+    x[:] = np.clip(x,-12,upperlim) #! Clipping the log value to 1e-10 below and nmaxfactor*mean above.
     # newmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
     return x
     return x*oldmean/newmean
@@ -335,9 +338,9 @@ def full_RHS(t,uk, n,ku =ku,klogn = klogn,visc = 1,forc = 1,rhsu = rhsu, rhsv = 
     
     
     
-    rhsuk += (rfft_mpi(rhsu, pk) )*dealias*0.5 + fk[0]*dealias
-    rhsvk += (rfft_mpi(rhsv, pk) )*dealias*0.5 + fk[1]*dealias
-    rhswk += (rfft_mpi(rhsw, pk) )*dealias*0.5 + fk[2]*dealias  
+    rhsuk += (rfft_mpi(rhsu, pk) )*dealias*0.5 
+    rhsvk += (rfft_mpi(rhsv, pk) )*dealias*0.5 
+    rhswk += (rfft_mpi(rhsw, pk) )*dealias*0.5 
     
     ## The pressure term
     pk[:] = 1j*invlap  * (kx*rhsuk + ky*rhsvk + kz*rhswk)
@@ -345,9 +348,9 @@ def full_RHS(t,uk, n,ku =ku,klogn = klogn,visc = 1,forc = 1,rhsu = rhsu, rhsv = 
     
 
     ## The RHS term with the pressure   
-    ku[0] = rhsuk - 1j*kx*pk - nu*((-lap)**lp)*uk[0]*isexplicit * visc
-    ku[1] = rhsvk - 1j*ky*pk - nu*((-lap)**lp)*uk[1]*isexplicit * visc
-    ku[2] = rhswk - 1j*kz*pk - nu*((-lap)**lp)*uk[2]*isexplicit * visc
+    ku[0] = rhsuk - 1j*kx*pk - nu*((-lap)**lp)*uk[0]*isexplicit * visc+ fk[0]*dealias
+    ku[1] = rhsvk - 1j*ky*pk - nu*((-lap)**lp)*uk[1]*isexplicit * visc+ fk[1]*dealias
+    ku[2] = rhswk - 1j*kz*pk - nu*((-lap)**lp)*uk[2]*isexplicit * visc+ fk[2]*dealias
     
     #the rhs for the number density
     vk[0] = uk[0] - tps*(ku[0] - rhsuk)*dealias #! DuDt =  ku - nonlinear part.
@@ -445,7 +448,7 @@ def load_npz(paths,uk,logn,tps = tps, tf = tf,loadn=  True): #! Rewrite
         # u[1,lidx] = Field['v'][idx]
         # u[2,lidx] = Field['w'][idx]  
     return uk, logn
-    
+10    
     
 def load_hdf5(paths, u, logn,tps =tps, tf = tf):
     with h5py.File(paths/'Fields.hdf5','r+', driver = 'mpio', comm = comm) as f:
@@ -455,7 +458,7 @@ def load_hdf5(paths, u, logn,tps =tps, tf = tf):
         logn[:] = np.log(f[f'/st_{tps/tf:.3f}/n'][sx,...][:])
     
     return u,logn
-
+10
 def save(i,uk,logn,tf = tf, tps = tps): 
     
     # div = diff_x(u[0], rhsu) + diff_y(u[1],rhsv) + diff_z(u[2],rhsw)
@@ -486,7 +489,7 @@ def save(i,uk,logn,tf = tf, tps = tps):
     np.savez_compressed(f"{new_dir}/Fields_k_{rank}",uk = uk[0],vk = uk[1],wk = uk[2])
     np.savez_compressed(f"{new_dir}/Energy_spectrum",ek = ek_arr)
     np.savez_compressed(f"{new_dir}/Flux_spectrum",Pik = Pik_arr)
-    n[:] = np.exp(logn)
+    n[:] = 10**(logn)
     np.savez_compressed(f"{new_dir}/{wg}_sts_{tps/tf:.3f}_log/n_{rank}",n = n)
     
     comm.Barrier()
@@ -530,7 +533,7 @@ def evolve_and_save(t,  u,logn):
     
     for i in range(t.size-1):
         calc_time += time() - t3
-        if rank == 0:  print(f"step {i} in time {time() - t3}", end= '\r')
+        if rank == 0:  print(f"step {i} in time {time() - t3}",end= '\r',file = sys.stderr)
         ## ------------- saving the data -------------------- ##
         if i % st ==0 : save(i,uk,logn)
         ## -------------------------------------------------- ##
@@ -540,7 +543,7 @@ def evolve_and_save(t,  u,logn):
         
         
         uknew[:],lognnew[:] = RK4(t,h, uk,logn)
-        logn[:] = lognnew*1.0
+        logn[:] = clip_error(lognnew)
         uknew[:] = (uknew)*hypervisc
         
         # ------------------- ensuring n in non-negative ------------------- #
@@ -699,7 +702,7 @@ if rank ==0 : print(f" max divergence {divmax}")
 
 #----------------- The initial energy ------------------
 e0 = comm.allreduce(0.5*dx*dy*dz*np.sum(u[0]**2 + u[1]**2 + (u[2]**2)),op = MPI.SUM)
-n[:] = np.exp(logn)
+n[:] = 10**(logn)
 nmean = comm.allreduce(n.sum(),op =MPI.SUM)/N**3
 nmax = comm.allreduce(n.max(),op =MPI.MAX)
 nmin = comm.allreduce(n.min(),op =MPI.MIN)
