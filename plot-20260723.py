@@ -2,7 +2,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-import pathlib,os
+import pathlib,os,h5py
 from scipy.fft import fftfreq,rfftn, irfftn
 # %%
 N =256
@@ -60,14 +60,17 @@ def e3d_to_e1d(x):  return np.histogram(k.ravel(),bins = shells,weights=x.ravel(
 # plt.colorbar(p1)
 
 #%%
-prtcl_path = lambda t,stb: pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/stochastic/highn/N_256_Re_1003.2/time_{t:.1f}/wo_g_stb_{stb:.3f}_sts_0.001/")
+names = ["","highn/","highhighn/","synthetic/"]
+M0s = 7.2*np.array([1e-4,1e-3,1e-2,1e-1])
+prtcl_path = lambda t,stb,name = "": pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/stochastic/{name}N_256_Re_1003.2/time_{t:.1f}/wo_g_stb_{stb:.3f}_sts_0.001/")
 times = [float(i.split("_")[-1]) for i in os.listdir(prtcl_path(0,stb_s[0]).parent.parent) if "time_" in i]
 times.sort()
 times = np.array(times)
-times
+times = np.arange(times[0], times[-1] + 0.5, 1) #! Reducing data loading.
 Ntimes = len(times)
 prtcl_mass = np.zeros((Ntimes,Nprtcl[0]))
 prtcl_id = np.zeros((Ntimes,Nprtcl[0]))
+#%%
 #%%
 
 # # %%
@@ -113,8 +116,80 @@ prtcl_id = np.zeros((Ntimes,Nprtcl[0]))
 # %%
 
 # %%
+def load_and_plot(nami,ax,xs,ys,dets,down_lim,up_lim):
+    
+    tot_mass = []
+    std_mass = []
+    sample_traj = []
+    for kk,stb in enumerate(stb_s):
+        # continue
+        # if kk< 2: 
+        #     # continue
+        #     times = np.array(list(np.arange(0,1.95,0.1)) +  list(np.arange(2,40.1,0.5)))
+        # else: 
+        #     times = np.arange(0,40.1,0.5)
+        Ntimes = len(times)
+        prtcl_mass = np.zeros((Ntimes,Nprtcl[kk]))
+        prtcl_id = np.zeros((Ntimes,Nprtcl[kk]))
+        for i,t in enumerate(times):
+            prtcl_count = 0
+            num_process = len([i for i in os.listdir(prtcl_path(t,stb,names[nami])) if "state_" in i])
+            print(f"St = {stb:.3f}, Time = {t:.1f}, name= {names[nami]},num_process= {num_process}",end = "\r")
+            # continue
+            for rank in range(num_process):
+                data = np.load(prtcl_path(t,stb,names[nami])/f"state_{rank}.npz")
+                prtcl_id[i,prtcl_count: prtcl_count+data['prtclid'].shape[0] ] = data['prtclid'].ravel()
+                
+                prtcl_mass[i,prtcl_count: prtcl_count+data['prtclid'].shape[0] ] = data['mass']
+                prtcl_count += data['prtclid'].shape[0]
+                
+            sortedidx = np.argsort(prtcl_id[i])
+            prtcl_id[i] = prtcl_id[i,sortedidx]
+            prtcl_mass[i] = prtcl_mass[i,sortedidx]
+            
+        prtcl_count = np.random.randint(0,Nprtcl[kk],100)
+        sample_traj.append(prtcl_mass[:,prtcl_count]/prtcl_mass[0,prtcl_count])
+        tot_mass.append( prtcl_mass.sum(axis = 1))
+        std_mass.append( np.std(prtcl_mass/prtcl_mass[0],axis = 1))
+        
+        
+        
+        ax.plot(times, tot_mass[kk]/tot_mass[kk][0],'-',color = cols[kk],label = fr'${stb/sts:.1f}$')
+        ax.fill_between(times,-std_mass[kk]+tot_mass[kk]/(tot_mass[kk][0]) ,std_mass[kk]+tot_mass[kk]/(tot_mass[kk][0]),color = cols[kk],alpha = 0.3,lw = 0)
+        
+        
+        
+        xs.append(times)
+        ys.append(tot_mass[kk])
+        down_lim.append(-std_mass[kk]+tot_mass[kk])
+        up_lim.append(std_mass[kk]+tot_mass[kk])
+        dets.append(fr'${stb/sts:.1f}, M0 = 7.2 \times 10^{{{np.log10(M0s[nami]/7.2):.0f}}}$')
+    
+    
+    ax.set_xlabel(r'$t$')
+    # ax.set_ylim(1,1.01)
+    # ax.set_xlim(0,1.0)
+    ax.set_title(fr"$7.2 \times 10^{{{np.log10(M0s[nami]/7.2):.0f}}}$")
+    ax.set_yscale('log',base = 8) 
+    # plt.text(-1.0,1.023,r"$St_b(0)/St_s$",ha = 'center')
+# %%
 
 #%%
+mpl.rcParams['text.usetex'] =  True
+fig, axs = plt.subplots(1,4, figsize = (7,1.5),dpi = 300,sharex = True)
+for nami in range(len(names)):
+    # continue
+    xs, ys, dets,up_lim,down_lim = [], [], [],[], []
+    load_and_plot(nami,axs[nami],xs,ys,dets,down_lim,up_lim)
+axs[-1].legend(ncols = 4, handlelength= 1, frameon = False, loc= "upper center",bbox_to_anchor = (-1.3,1.5))
+axs[0].set_ylabel(r'$M_b/M_b(t = 0)$')
+fig.suptitle(fr"$St_s = {sts:.3f}$",y = -0.2)
+# fig.tight_layout()
+
+#%% 
+np.savez_compressed("")
+#%%
+
 # Ntimes = len(times)
 tot_mass = []
 std_mass = []
