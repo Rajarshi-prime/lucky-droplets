@@ -111,7 +111,7 @@ eta_dim = 0.6*1e-3 #! Kolmogorov length scale in meter in clouds
 tau_eta_dim = 0.03 #! #! Kolmogorov time scale in seconds in clouds.
 g = 9.81*(tau_eta_dim**2/eta_dim)*(eta/tf**2) if gravity else 0 # Gravity in the simulation units
 # rs = rsdim/eta_dim*eta #! radius of small particles in simulation units
-rs = eta*((9/(2*rhop))/sts)**0.5 #! radius of small particles in simulation units
+rs = eta*((9/(2*rhop))*sts)**0.5 #! radius of small particles in simulation units
 #* if the eta corresponds to 0.6 mm, then the Stokes of the small particles of 2.7 microns diameter is 0.001.
 
 #----  Kolmogorov length scale - \eta \epsilon etc...---------

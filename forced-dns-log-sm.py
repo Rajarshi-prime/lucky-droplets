@@ -97,7 +97,7 @@ eta_dim = 0.6*1e-3 #! Kolmogorov length scale in meter in clouds
 tau_eta_dim = 0.03 #! #! Kolmogorov time scale in seconds in clouds.
 g = 9.81*(tau_eta_dim**2/eta_dim)*(eta/tf**2) if gravity else 0 # Gravity in the simulation units
 # rs = rsdim/eta_dim*eta #! radius of small particles in simulation units
-rs = ((9/(2*rhop))*eta**2/sts)**0.5 #! radius of small particles in simulation units
+rs = eta*(9*sts/2/rhop)**0.5 #! radius of small particles in simulation units
 #* if the eta corresponds to 0.6 mm, then the Stokes of the small particles of 2.7 microns diameter is 0.001.
 nprtcls0 = 3*M0*TWO_PI**3/(rhop * 4 * PI *rs**3) #! Initial number of small particles 
 nmaxfactor = N**3 #! Multiply this to the mean of n to get the maximum n that you can have.
@@ -296,8 +296,9 @@ def clip_error(x):
 
     x[:] = np.clip(x,-12,upperlim) #! Clipping the log value to 1e-10 below and nmaxfactor*mean above.
     # newmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
-    return x
-    return x*oldmean/newmean
+    newmean = comm.allreduce(np.sum(10**(x)/N**3),op = MPI.SUM)
+    return x - np.log10(newmean) + 0 #! Effectively scaling the newmean back to 1.0
+    # return x*oldmean/newmean
 
 def full_RHS(t,uk, n,ku =ku,klogn = klogn,visc = 1,forc = 1,rhsu = rhsu, rhsv = rhsv, rhsw = rhsw, rhsuk = rhsuk, rhsvk = rhsvk, rhswk = rhswk,vgradlognk = vgradlognk, divvk = divvk, vgradlogn = vgradlogn, vtemp = vtemp, logn_temp = logn_temp ):
     ## The RHS terms of u, v and w excluding the forcing and the hypervisocsity term 
@@ -490,6 +491,10 @@ def save(i,uk,logn,tf = tf, tps = tps):
     np.savez_compressed(f"{new_dir}/Energy_spectrum",ek = ek_arr)
     np.savez_compressed(f"{new_dir}/Flux_spectrum",Pik = Pik_arr)
     n[:] = 10**(logn)
+    pk[:] = rfft_mpi(n,pk)*dealias
+    nk_arr = comm.allreduce(e3d_to_e1d(np.abs(pk)**2*normalize),op = MPI.SUM) #! The number density spectrum
+    np.savez_compressed(f"{new_dir}/{wg}_sts_{tps/tf:.3f}_log/n_spectrum",nk = nk_arr)
+    
     np.savez_compressed(f"{new_dir}/{wg}_sts_{tps/tf:.3f}_log/n_{rank}",n = n)
     
     comm.Barrier()

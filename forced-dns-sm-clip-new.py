@@ -6,6 +6,8 @@ from scipy.fft import fft ,  ifft ,  irfft2 ,  rfft2 , irfftn ,  rfftn, fftfreq,
 from mpi4py import MPI
 from time import time
 import pathlib,os,sys,h5py
+from scipy.interpolate import CubicSpline, splrep,splev,splder
+from scipy.optimize import newton,brentq
 curr_path = pathlib.Path(__file__).parent
 forcestart = True
 if int(sys.argv[-1]) == 0 :
@@ -123,8 +125,7 @@ param["interval of saving indices"] = st
 
 # savePath = pathlib.Path(f"/home/rajarshi.chattopadhyay/python/3D-DNS/data/samriddhi-tests-euler-spherical-dealias-final/N_{N}")
 re = 1/nu if nu !=0 else "inf"
-# savePath = pathlib.Path(f"./data_cosine_thresh_clip/forced_{isforcing}/N_{N}_Re_{re:.1f}")
-savePath = pathlib.Path(f"./data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}")
+savePath = pathlib.Path(f"./data_cosine_clip_new/forced_{isforcing}/N_{N}_Re_{re:.1f}")
 
 if rank == 0:
     print(savePath)
@@ -286,23 +287,38 @@ def forcing(uk,fk):
     
     return fk*isforcing*dealias
     
+
      
-def clip_zero(x):
+def clip_zero(n,target = 1):
     # """Clips negative values to zero and rescales the to conserve the mean
     # """
     # oldmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
     # x[:] = np.clip(x,0,None)
     # newmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
+    '''Creting the h(s) function by choosing different s and then finding sstar. Returning the clipped sstar'''
+    diff = comm.allreduce(np.abs((np.clip(n,0,None) - n)).sum(),op = MPI.SUM)/N**3
+    if diff < 1e-8: return n
     
-    # return x*oldmean/newmean
+    nmax = comm.allreduce(np.max(n),op = MPI.MAX)
+    s = np.linspace(-nmax,nmax,20)
+    hs = s*0.0
+    for i in range(s.size):
+        ss = comm.allreduce(np.clip(s[i ] + n  ,0,None).sum(),op = MPI.SUM)/N**3 - target
+        hs[i] = ss
 
-    """Clips values between zero and nmin_thresh to zero and and rescales the to conserve the mean
-    """
-    oldmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
-    x[:] = np.where(x<nmin_thresh,0,x)
-    newmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
+
+
+    tck = splrep(s, hs, k=5)
+    dtck = splder(tck)
+
+    spl = lambda x: splev(x, tck)
+    dspl = lambda x: splev(x, dtck)
+
+    s0 = 0.0
+    sstar = newton(spl, s0, fprime=dspl,tol = 1e-10)
     
-    return x*oldmean/newmean
+    return np.clip(sstar + n, 0, None)
+
 
 def full_RHS(t,uk, n,ku =ku,kn = kn,visc = 1,forc = 1,rhsu = rhsu, rhsv = rhsv, rhsw = rhsw, rhsuk = rhsuk, rhsvk = rhsvk, rhswk = rhswk,divvnk = divvnk,nk = nk, vn = vn, ):
     ## The RHS terms of u, v and w excluding the forcing and the hypervisocsity term 
@@ -471,7 +487,6 @@ def load_hdf5(paths, u, n,tps =tps, tf = tf):
     return u,n
 
 def save(i,uk,n,tf = tf, tps = tps): 
-    
     # div = diff_x(u[0], rhsu) + diff_y(u[1],rhsv) + diff_z(u[2],rhsw)
     # if rank == 0: print(f"Rank {rank} has divergence {np.sum(np.abs(div))}")
     ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
@@ -685,7 +700,7 @@ if forcestart:
     
     ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
     ek_arr0 = comm.allreduce(e3d_to_e1d(ek),op = MPI.SUM) #! This is the shell-summed ek a
-    # if rank ==0: print(ek_arr0, np.sum(ek_arr0))
+    if rank ==0: print(ek_arr0, np.sum(ek_arr0))
     e0 = np.sum(ek_arr0)
     uk[0] = uk[0] *(einit/e0)**0.5
     uk[1] = uk[1] *(einit/e0)**0.5
