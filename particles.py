@@ -99,7 +99,7 @@ class MPI_particles:
 
         # ------------------- initializing particles ------------------- #
     
-        self.coord = np.random.uniform(0,self.L,(self.Nprtcl_proc,2*self.d +1 )) #! Contains both position and velocity and the mass normalized by M0
+        self.coord = np.random.uniform(0,self.L,(self.Nprtcl_proc,2*self.d +1 )) #! Contains both position and velocity and the mass normalized by M0 initialized randomly between zero and two pi 
         self.prtclid = np.arange(self.rank*self.Nprtcl_proc,(self.rank
          + 1)*self.Nprtcl_proc).reshape((-1,1)) #! Unique particle ID
         self.coord[:,-1] = st**1.5*self.factor

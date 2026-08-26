@@ -7,6 +7,7 @@ from mpi4py import MPI
 from time import time
 import pathlib,os,sys,h5py
 from particles import MPI_particles
+from scipy.interpolate import PchipInterpolator
 curr_path = pathlib.Path(__file__).parent
 forcestart = False
 if int(sys.argv[-1]) ==0 :
@@ -16,7 +17,7 @@ else:
 start_big_particle = True
 wg = "with_g" if gravity else "wo_g"
 
-## ---------------MPI things--------------
+## ––––––––––––––-MPI things––––––––––––––
 comm = MPI.COMM_WORLD
 num_process =  comm.Get_size()
 rank = comm.Get_rank()
@@ -26,18 +27,21 @@ viscosity_integrator = "explicit"
 # viscosity_integrator = "exponential"
 if viscosity_integrator == "explicit": isexplicit = 1.
 else : isexplicit = 0.
-## ---------------------------------------
+## ––––––––––––––––––––––––––––––––––––––-
 
-## ------------- Time steps --------------
+## ––––––––––––- Time steps ––––––––––––––
 N = 256
 dt =  0.2*0.256/N #! Such that increasing resolution will decrease the dt
 dtmax = 5*0.256/N
 dtmin = 0.2*0.256/N
 T = 20
-dt_save = 0.1
+dt_save = 0.5
 st = round(dt_save/dt) #!Savestep : Confusing
 sts = 0.001
-stb_s = [0.017,0.017/4, 0.017*4,0.017*6.35]
+stb_s = [0.017,0.017/4, 0.017*4,0.017*6.35]*5 #! For 5 different initial conditions.
+init_name = ['random']*5 + ['Qpos']*5 + ['Qneg']*5 + ['Qpos_high']*5 + ['Qneg_high']*5
+uniquestbs = len(np.unique(stb_s))
+if uniquestbs !=4 : raise SystemExit("Check the initial big Stokes numbers")
 # stb_s = [0.017/4,0.017/9]
 stb_s.sort()
 stb_s= np.array(stb_s)
@@ -55,9 +59,9 @@ Typical velocities in cloud : 10 m/s = u_rms
 Kolmogorov timescale : 1 sec = tau_eta
 g = 9.81 m/s^2 = 9.81 *(0.1*u_rms)/(tau_eta) ~ 2.5
 """
-## ---------------------------------------
+## ––––––––––––––––––––––––––––––––––––––-
 
-## -------------Defining the grid ---------------
+## ––––––––––––-Defining the grid ––––––––––––––-
 PI = np.pi
 TWO_PI = 2*PI
 Nf = N//2 + 1
@@ -72,21 +76,21 @@ Kx = Ky = fftfreq(N,  1./N)*TWO_PI/L
 Kz = np.abs(Ky[:Nf])
 
 kx,  ky,  kz = np.meshgrid(Kx,  Ky[sx],  Kz,  indexing = 'ij')
-## -----------------------------------------------
+## ––––––––––––––––––––––––––––––––––––––––––––––-
 
 
 
 
-## --------- kx and ky for differentiation ---------    
+## ––––––––- kx and ky for differentiation ––––––––-    
 kx_diff = np.moveaxis(kz,[0,1,2],[2,1,0]).copy()
 ky_diff = np.swapaxes(kx_diff, 0, 1).copy()
 kz_diff = np.moveaxis(kz, [0,1], [1,0]).copy()
 
 if rank ==0 : print(kx_diff.shape, ky_diff.shape, kz_diff.shape)
 
-## -------------------------------------------------
+## ––––––––––––––––––––––––––––––––––––––––––––––––-
 
-## ----------- Parameters ----------
+## ––––––––––- Parameters ––––––––––
 lp = 1 # Hyperviscosity power
 # nu0 = 8.192 #! Viscosity for N = 1
 # nu0 = 4.714 #! Viscosity from Pope's 256 run 
@@ -106,15 +110,21 @@ nshells = 1 # Number of consecutive shells to be forced
 shell_no = np.arange(1,1+nshells) # the shells to be forced 
 tf =eta**2/nu #* the expected kolvmogorov time scale 
 tps = sts*tf # The particle timescale
-eta_dim = 0.03
-tau_eta_dim = 6e-4
+eta_dim = 0.6*1e-3 #! Kolmogorov length scale in meter in clouds 
+tau_eta_dim = 0.03 #! #! Kolmogorov time scale in seconds in clouds.
 g = 9.81*(tau_eta_dim**2/eta_dim)*(eta/tf**2) if gravity else 0 # Gravity in the simulation units
-#----  Kolmogorov length scale - \eta \epsilon etc...---------
+# rs = rsdim/eta_dim*eta #! radius of small particles in simulation units
+rs = eta*(9*sts/2/rhop)**0.5 #! radius of small particles in simulation units
+#* if the eta corresponds to 0.6 mm, then the Stokes of the small particles of 2.7 microns diameter is 0.001.
+nprtcls0 = 3*M0*TWO_PI**3/(rhop * 4 * PI *rs**3) #! Initial number of small particles 
+nmin_thresh = TWO_PI**3/nprtcls0/(dx*dy*dz)
+
+#––––  Kolmogorov length scale - \eta \epsilon etc...––––––––-
 
 f0 = (nu0)**3 * TWO_PI**3/ nshells #! Total power input at each shells
 
 
-if rank ==0 : print(f" Power input  density : {nshells*f0/TWO_PI**3} \n Viscosity : {nu}, Re : {1/nu},dt : {dt}, desired t_eta {tf}, gravity {gravity}")
+if rank ==0 : print(f" Power input  density : {nshells*f0/TWO_PI**3} \n Viscosity : {nu}, Re : {1/nu},dt : {dt}, desired t_eta {tf}")
 
 param = dict()
 param["nu"] = nu
@@ -126,7 +136,7 @@ param["Final_time"] = T
 param["time_step"] = dt
 param["interval of saving indices"] = st
 
-## ---------------------------------
+## ––––––––––––––––––––––––––––––––-
 
 # savePath = pathlib.Path(f"/home/rajarshi.chattopadhyay/python/3D-DNS/data/samriddhi-tests-euler-spherical-dealias-final/N_{N}")
 re = 1/nu if nu !=0 else "inf"
@@ -137,7 +147,7 @@ if rank == 0:
     try: savePath.mkdir(parents=True,  exist_ok=True)
     except FileExistsError: pass
 
-## ------------Useful Operators-------------------
+## ––––––––––––Useful Operators––––––––––––––––––-
 
 lap = -(kx**2 + ky**2 + kz**2 )
 k = (-lap)**0.5
@@ -159,22 +169,16 @@ shells[0] = 0.
 
 cond_ky = np.abs(np.round(Ky))<=N//3
 cond_kz = np.abs(np.round(Kz))<=N//3
-## -------------------------------------------------
-stbs = []
-for i,stb in enumerate(stb_s):
-
-    stbs.append(MPI_particles(comm, L, N, Nprtcl[i],sts, stb,g,nu, tf,rhop,M0 ,d,X,Y,Z, x,y,z))
-    stbs[i].to_interp(2*d+1) # u, v_s and c_s
-    stbs[i].to_exterp(1)
+## ––––––––––––––––––––––––––––––––––––––––––––––––-
 
 
-## -------------zeros arrays -----------------------
+## ––––––––––––-zeros arrays for fields ––––––––––––––––––––––-
 u  = np.zeros((3, Np, N, N), dtype= np.float64)
 v  = np.zeros((3, Np, N, N), dtype= np.float64)
 vtemp  = np.zeros((3, Np, N, N), dtype= np.float64)
 vn  = np.zeros((3, Np, N, N), dtype= np.float64)
 omg= np.zeros((3, Np, N, N), dtype= np.float64)
-n = np.zeros((len(stbs),Np,N,N))
+n = np.zeros((len(stb_s),Np,N,N))
 ntemp = n[0].copy()
 nnew = n.copy()
 
@@ -204,9 +208,9 @@ rhswk = rhsuk.copy()
 rhsu = np.zeros_like(u[0])
 rhsv = rhsu.copy()
 rhsw = rhsu.copy()
-sump = [1.0*stb.coord for stb in stbs]
-tempcoord = [1.0*stb.coord for stb in stbs]
-kps = [0.0]*len(stbs)
+sump = [0.0]* len(stb_s)
+tempcoord = [0.0]*len(stb_s)
+kps = [0.0]*len(stb_s)
 
 ku = np.zeros((3, N, Np, Nf), dtype = np.complex128)
 kn = n.copy()
@@ -220,10 +224,10 @@ arr_mpi = np.zeros((num_process,  Np,  Np, Nf), dtype= np.complex128)
 arr_mpi_r = np.zeros((num_process,  Np,  Np, N), dtype= np.float64)
 
 
-## -----------------------------------------------------
+## ––––––––––––––––––––––––––––––––––––––––––––––––––––-
 
 
-## ------FFT + iFFT + derivative functions------- 
+## ––––––FFT + iFFT + derivative functions––––––- 
 def rfft_mpi(u, fu):
     arr_temp_fr[:] = rfft2(u,  axes=(1, 2))
     arr_mpi[:] = np.swapaxes(np.reshape(arr_temp_fr, (Np,  num_process,  Np, Nf)), 0, 1)
@@ -310,6 +314,15 @@ def clip_zero(x):
     
     return x*oldmean/newmean
 
+
+
+
+
+
+
+
+
+
 def full_RHS(t,uk, n,sump, tempcoord, stbs,ku =ku,kn = kn,fc = fc,visc = 1,forc = 1,kps = kps):
     global rhsu ,rhsv , rhsw , rhsuk ,rhsvk , rhswk, nk, vn, ntemp, divvnk,fck
     ## The RHS terms of u, v and w excluding the forcing and the hypervisocsity term 
@@ -350,9 +363,9 @@ def full_RHS(t,uk, n,sump, tempcoord, stbs,ku =ku,kn = kn,fc = fc,visc = 1,forc 
     
     
     
-    rhsuk += (rfft_mpi(rhsu, pk) )*dealias*0.5 
-    rhsvk += (rfft_mpi(rhsv, pk) )*dealias*0.5 
-    rhswk += (rfft_mpi(rhsw, pk) )*dealias*0.5 
+    rhsuk += (rfft_mpi(rhsu, pk) )*dealias*0.5 + fk[0]*dealias
+    rhsvk += (rfft_mpi(rhsv, pk) )*dealias*0.5 + fk[1]*dealias
+    rhswk += (rfft_mpi(rhsw, pk) )*dealias*0.5 + fk[2]*dealias  
     
     ## The pressure term
     pk[:] = 1j*invlap  * (kx*rhsuk + ky*rhsvk + kz*rhswk)
@@ -360,9 +373,9 @@ def full_RHS(t,uk, n,sump, tempcoord, stbs,ku =ku,kn = kn,fc = fc,visc = 1,forc 
     
 
     ## The RHS term with the pressure   
-    ku[0] = rhsuk - 1j*kx*pk - nu*((-lap)**lp)*uk[0]*isexplicit * visc + fk[0]*dealias
-    ku[1] = rhsvk - 1j*ky*pk - nu*((-lap)**lp)*uk[1]*isexplicit * visc + fk[1]*dealias
-    ku[2] = rhswk - 1j*kz*pk - nu*((-lap)**lp)*uk[2]*isexplicit * visc + fk[2]*dealias  
+    ku[0] = rhsuk - 1j*kx*pk - nu*((-lap)**lp)*uk[0]*isexplicit * visc
+    ku[1] = rhsvk - 1j*ky*pk - nu*((-lap)**lp)*uk[1]*isexplicit * visc
+    ku[2] = rhswk - 1j*kz*pk - nu*((-lap)**lp)*uk[2]*isexplicit * visc
     
     #the rhs for the number density
     vk[0] = uk[0] - tps*(ku[0] - rhsuk)*dealias #! DuDt =  ku - nonlinear part.
@@ -377,7 +390,7 @@ def full_RHS(t,uk, n,sump, tempcoord, stbs,ku =ku,kn = kn,fc = fc,visc = 1,forc 
     v[1] = irfft_mpi(vk[1]*dealias, v[1])
     v[2] = irfft_mpi(vk[2]*dealias, v[2]) -tps*g *2.0 #! Adding 2 on gravity so that it gets adjusted when added with a factor of half.
 
-    for ii in range(len(stbs)):
+    for ii in range(len(stb_s)):
         
         nk[:] = rfft_mpi(n[ii],nk)*dealias
         vn[:] = irfft_mpi(nk*phase_k*dealias, ntemp)[None,...]*vtemp
@@ -408,11 +421,12 @@ def RK4(t,h,stbs, uk,n,uknew = uknew, nnew = nnew,sump = sump, tempcoord = tempc
     """Template on how to evolve the particle + flow system"""
     uknew[:] = 1.0*uk
     nnew[:] = 1.0*n    
-    for j in range(len(stbs)):
+    for j in range(len(stb_s)):
         sump[j] = stbs[j].coord*1.0
         tempcoord[j] = stbs[j].coord*1.0
+    comm.Barrier()
     ku[:],kn[:],kps[:],sump[:] = full_RHS(t,uk, clip_zero(n),sump,tempcoord,stbs)
-    for j in range(len(stbs)): 
+    for j in range(len(stb_s)): 
         sump[j] += h/6.0*kps[j]
         tempcoord[j] = stbs[j].coord + h/2 *kps[j]
     uknew += h/6.0*ku
@@ -420,21 +434,21 @@ def RK4(t,h,stbs, uk,n,uknew = uknew, nnew = nnew,sump = sump, tempcoord = tempc
     
 
     ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h/2,uk + ku*h/2, clip_zero(n + kn*h/2),sump, tempcoord, stbs)
-    for j in range(len(stbs)): 
+    for j in range(len(stb_s)): 
         sump[j] += h/3.*kps[j]
         tempcoord[j] = stbs[j].coord + h/2 *kps[j]
     uknew += h/3.0*ku
     nnew += h/3.0*kn
     
     ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h/2,uk + ku*h/2, clip_zero(n + kn*h/2),sump, tempcoord, stbs)
-    for j in range(len(stbs)): 
+    for j in range(len(stb_s)): 
         sump[j] += h/3.0*kps[j]
         tempcoord[j] = stbs[j].coord + h *kps[j]
     uknew += h/3.0*ku
     nnew += h/3.0*kn
     
     ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h,uk + ku*h, clip_zero(n + kn*h),sump, tempcoord, stbs)
-    for j in range(len(stbs)): 
+    for j in range(len(stb_s)): 
         sump[j] += h/6.*kps[j]
         stbs[j].coord = 1.0*sump[j]
         
@@ -444,10 +458,10 @@ def RK4(t,h,stbs, uk,n,uknew = uknew, nnew = nnew,sump = sump, tempcoord = tempc
     return uknew,nnew
     
 
-## -----------------------------------------------------------
+## ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––-
 
 
-## ---------------- Saving data + energy + Showing total energy ---------------------
+## –––––––––––––––– Saving data + energy + Showing total energy ––––––––––––––––––––-
 def load_trunc(x):
     x1 = np.zeros((*x.shape[:-2],N,Nf),dtype = np.complex128)
     x1[...,cond_ky,:x.shape[-1]] = x.copy()
@@ -472,7 +486,7 @@ def load_npz(paths,uk,n,tps = tps, tf = tf,loadn=  True): #! Rewrite
                     nField = np.load(paths/f"{wg}_sts_{tps/tf:.3f}/n_{slab}.npz")
                     n[:,lidx] = nField['n'][idx][None,...]
                 else: 
-                    for ii in range(len(stbs)):
+                    for ii in range(len(stb_s)):
                         nField = np.load(paths/f"{wg}_sts_{tps/tf:.3f}_stb_{stb_s[ii]:.3f}/n_{slab}.npz")
                         n[ii,lidx] = nField['n'][idx][None,...]
             else: n[lidx] = 1.0
@@ -502,11 +516,10 @@ def load_hdf5(paths, u, n,tps =tps, tf = tf):
     return u,n
 
 def save(i,tt,uk,n,stbs,tf = tf, tps = tps): 
-    # return None
     # div = diff_x(u[0], rhsu) + diff_y(u[1],rhsv) + diff_z(u[2],rhsw)
     # if rank == 0: print(f"Rank {rank} has divergence {np.sum(np.abs(div))}")
     ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
-    for ii in range(len(stbs)):
+    for ii in range(len(stb_s)):
         sump[ii] = stbs[ii].coord*1.0
         tempcoord[ii] = stbs[ii].coord*1.0
     ku[:],_,_,_ = full_RHS(t,uk, n,sump, tempcoord, stbs,visc = 0,forc = 0)
@@ -520,9 +533,9 @@ def save(i,tt,uk,n,stbs,tf = tf, tps = tps):
     u[0] = irfft_mpi(uk[0], u[0])
     u[1] = irfft_mpi(uk[1], u[1])
     u[2] = irfft_mpi(uk[2], u[2])
-    # ----------- ----------------------------
+    # ––––––––––- ––––––––––––––––––––––––––––
     #                 Saving the data (field)
-    # ----------- ----------------------------
+    # ––––––––––- ––––––––––––––––––––––––––––
     if (Nprtcl > 0).any(): new_dir = savePath/f"time_{tt:.1f}"
     else: new_dir = savePath/f"last"
     try: new_dir.mkdir(parents=True,  exist_ok=True)
@@ -532,16 +545,16 @@ def save(i,tt,uk,n,stbs,tf = tf, tps = tps):
     np.savez_compressed(f"{new_dir}/Fields_k_{rank}",uk = uk[0],vk = uk[1],wk = uk[2])
     np.savez_compressed(f"{new_dir}/Energy_spectrum",ek = ek_arr)
     np.savez_compressed(f"{new_dir}/Flux_spectrum",Pik = Pik_arr)
-    for jj in range(len(stbs)):
+    for jj in range(len(stb_s)):
         
         if Nprtcl[jj] > 0: 
-            new_dir_s = new_dir/f"{wg}_sts_{tps/tf:.3f}_stb_{stb_s[jj]:.3f}/"
+            new_dir_s = new_dir/f"{wg}_sts_{tps/tf:.3f}_stb_{stb_s[jj]:.3f}_init_{init_name[jj]}/"
             try: new_dir_s.mkdir(parents=True,  exist_ok=True)
             except FileExistsError: pass
             comm.Barrier()
             np.savez_compressed(new_dir_s/f"n_{rank}",n = n[jj])
             
-            new_dir_b = new_dir/f"{wg}_stb_{stb_s[jj]:.3f}_sts_{tps/tf:.3f}"
+            new_dir_b = new_dir/f"{wg}_stb_{stb_s[jj]:.3f}_sts_{tps/tf:.3f}_init_{init_name[jj]}"
             try: new_dir_b.mkdir(parents=True,  exist_ok=True)
             except FileExistsError: pass
             
@@ -563,9 +576,9 @@ def save(i,tt,uk,n,stbs,tf = tf, tps = tps):
     
     comm.Barrier()
     
-    # ----------- ----------------------------
+    # ––––––––––- ––––––––––––––––––––––––––––
     #          Calculating and printing
-    # ----------- ----------------------------
+    # ––––––––––- ––––––––––––––––––––––––––––
     eng1 = comm.allreduce(np.sum(0.5*(u[0]**2 + u[1]**2 + u[2]**2)*dx*dy*dz), op = MPI.SUM)
     eng2 = np.sum(ek_arr)
     nmin = comm.allreduce(np.min(n), op = MPI.MIN)
@@ -575,17 +588,17 @@ def save(i,tt,uk,n,stbs,tf = tf, tps = tps):
     #! Needs to be changed 
     # # dissp = -nu*comm.allreduce(np.sum((kc**(2*lp)*(np.abs(uk[0])**2 + np.abs(uk[1])**2) +sin_to_cos( ks**(2*lp)*(np.abs(uk[2])**2/alph**2 + np.abs(bk)**2)))), op = MPI.SUM)
     if rank == 0:
-        print( "#----------------------------","\n",f"Energy at time {tt} is : {eng1}, {eng2}","\n","#----------------------------")
+        print( "#––––––––––––––––––––––––––––","\n",f"Energy at time {tt} is : {eng1}, {eng2}","\n","#––––––––––––––––––––––––––––")
         print(f"Maximum divergence {divmax}")
         print(f"n mean, max ,min : {nmean, nmax, nmin}")
-        # print( "#----------------------------","\n",f"Total dissipation at time {t[i]} is : {dissp}","\n","#----------------------------")
+        # print( "#––––––––––––––––––––––––––––","\n",f"Total dissipation at time {t[i]} is : {dissp}","\n","#––––––––––––––––––––––––––––")
     comm.Barrier()
     return "Done!"    
     
     
     
   
-## ------------- Evolving the system ----------------- 
+## ––––––––––––- Evolving the system ––––––––––––––––- 
 def evolve_and_save(t,  u,n): 
 
     comm.Barrier()
@@ -608,10 +621,10 @@ def evolve_and_save(t,  u,n):
 
         calc_time += time() - t3
         if rank == 0:  print(f"step {i} in time {time() - t3}", end= '\r')
-        ## ------------- saving the data -------------------- ##
+        ## ––––––––––––- saving the data –––––––––––––––––––– ##
         if abs(np.sin(tt/dt_save*PI)) - np.sin(0.5*h/dt_save*PI) < 1e-12:
             save(i,tt,uk,n,stbs)
-        ## -------------------------------------------------- ##
+        ## –––––––––––––––––––––––––––––––––––––––––––––––––– ##
         t3 = time()
         
         
@@ -620,19 +633,20 @@ def evolve_and_save(t,  u,n):
         uknew[:],nnew[:] = RK4(tt,h,stbs, uk,n)
         comm.Barrier()
         hnew = dtmax
-        for j in range(len(stbs)):
+        for j in range(len(stb_s)):
             stbs[j].update_intrinsic()
-            stmin = comm.allreduce(np.min(stbs[j].st),op = MPI.MIN)
+            minst = np.min(stbs[j].st) if len(stbs[j].st.ravel()) > 0 else 65536
+            stmin = comm.allreduce(minst,op = MPI.MIN)
             hnew = min(hnew,0.1*stmin)
             n[j] = clip_zero(nnew[j])
         uknew[:] = (uknew)*hypervisc
         h = hnew
         if rank==0: print(f"For next step h : {h}")
-        # ------------------- ensuring n in non-negative ------------------- #
+        # ––––––––––––––––––- ensuring n in non-negative ––––––––––––––––––- #
 
         # pk[:] = rfft_mpi(n,pk)*dealias
         # n[:] = irfft_mpi(pk,n)
-        # ------------------------------------------------------------------- #
+        # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––- #
         
         
        
@@ -658,7 +672,7 @@ def evolve_and_save(t,  u,n):
         
         
  
-        ## -------------------------------------------------------
+        ## ––––––––––––––––––––––––––––––––––––––––––––––––––––––-
         if uk.max() > 100*N**3 : 
             print("Threshold exceeded at time", t[i+1], "Code about to be terminated")
             comm.Abort()
@@ -667,14 +681,14 @@ def evolve_and_save(t,  u,n):
         comm.Barrier()
         i += 1
         tt += h
-    ## ---------- Saving the final data ------------
+    ## –––––––––– Saving the final data ––––––––––––
     save(i+1,tt, uk,n,stbs)
     if rank ==0: print(f"average calculation time per step {calc_time/(t.size-1)}")
-    ## ---------------------------------------------
+    ## ––––––––––––––––––––––––––––––––––––––––––––-
 
     
 
-## --------------- Initializing ---------------------
+## ––––––––––––––- Initializing ––––––––––––––––––––-
 
 
 """Structure 
@@ -687,42 +701,206 @@ If not start from scratch."""
 
 
 #! Modify the loading process!
-
-if not forcestart:
-    ## ------------------------- Beginning from existing data -------------------------
-    if rank ==0 : print("Found existing simulation! Using last saved data.")
-    """Loading the data from the last time  """    
-    
-    paths = sorted([x for x in pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}").iterdir() if "time_" in str(x)], key=os.path.getmtime)
-    if len(paths) >0 and not start_big_particle: 
-        # paths = paths[-2]
-        paths = paths[0]
-        tinit = float(str(paths).split("time_")[-1])
+def initialize_fields(forcestart=forcestart):
+    if not forcestart:
+        ## ––––––––––––––––––––––––- Beginning from existing data ––––––––––––––––––––––––-
+        if rank ==0 : print("Found existing simulation! Using last saved data.")
+        """Loading the data from the last time  """    
         
-    else: 
-        paths = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}/last")
+        paths = sorted([x for x in pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}").iterdir() if "time_" in str(x)], key=os.path.getmtime)
+        if len(paths) >0 and not start_big_particle: 
+            # paths = paths[-2]
+            paths = paths[0]
+            tinit = float(str(paths).split("time_")[-1])
+            
+        else: 
+            paths = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}/last")
+            tinit = 0.
+        issts = [True for i in paths.iterdir() if "sts_" in str(i)]
+        loadn = True if len(issts) > 0 else False
+        # ––––––––––––––––––- specifying manually –––––––––––––––––––– #
+        # tinit = 20.0
+        # paths = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}/time_{tinit:.1f}")
+        # –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––– #
+        
+
+        if rank ==0 : print(f"Loading data from {paths}")
+        
+        uk[:],n[:] = load_npz(paths,uk, n,loadn = loadn)
+        
+        u[0] = irfft_mpi(uk[0], u[0])
+        u[1] = irfft_mpi(uk[1], u[1])
+        u[2] = irfft_mpi(uk[2], u[2])
+        return paths,tinit
+    
+    else:
+        ## –––––––––––––––––––––– Beginning from start ––––––––––––––––––––––––––––––––––
+
+        kinit = 31 # Wavenumber of maximum non-zero initial pressure mode.    
+        thu = np.random.uniform(0, TWO_PI,  k.shape)
+        thv = np.random.uniform(0, TWO_PI,  k.shape)
+        thw = np.random.uniform(0, TWO_PI,  k.shape)
+
+        # eprofile = 1/np.where(kint ==0, np.inf,kint**(2.0))/normalize
+        eprofile = kint**2*np.exp(-kint**2/2)/normalize
+        
+        
+        amp = (eprofile/np.where(kint == 0, np.inf, kint**2))**0.5
+        
+        uk[0] = amp*np.exp(1j*thu)*(kint**2<kinit**2)*(kint>0)*dealias
+        uk[1] = amp*np.exp(1j*thv)*(kint**2<kinit**2)*(kint>0)*dealias
+        uk[2] = amp*np.exp(1j*thw)*(kint**2<kinit**2)*(kint>0)*dealias
+        
+        u[0] = irfft_mpi(uk[0], u[0])
+        u[1] = irfft_mpi(uk[1], u[1])
+        u[2] = irfft_mpi(uk[2], u[2])
+        
+        uk[0] = rfft_mpi(u[0],uk[0])
+        uk[1] = rfft_mpi(u[1],uk[1])
+        uk[2] = rfft_mpi(u[2],uk[2])
+        
+        trm = (kx*uk[0]  + ky*uk[1] + kz*uk[2])
+        uk[0] = uk[0] + invlap*kx*trm
+        uk[1] = uk[1] + invlap*ky*trm
+        uk[2] = uk[2] + invlap*kz*trm
+        
+        ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
+        ek_arr0 = comm.allreduce(e3d_to_e1d(ek),op = MPI.SUM) #! This is the shell-summed ek a
+        # if rank ==0: print(ek_arr0, np.sum(ek_arr0))
+        e0 = np.sum(ek_arr0)
+        uk[0] = uk[0] *(einit/e0)**0.5
+        uk[1] = uk[1] *(einit/e0)**0.5
+        uk[2] = uk[2] *(einit/e0)**0.5
+        
+        
+        u[0] = irfft_mpi(uk[0], u[0])
+        u[1] = irfft_mpi(uk[1], u[1])
+        u[2] = irfft_mpi(uk[2], u[2])
+        
         tinit = 0.
-    issts = [True for i in paths.iterdir() if "sts_" in str(i)]
-    loadn = True if len(issts) > 0 else False
-    # ------------------- specifying manually ------------------- #
-    # tinit = 20.0
-    # paths = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}/time_{tinit:.1f}")
-    # ------------------------------------------------------------ #
+        n[:] = 1.0
+        
+        if rank == 0: print(f"Velocity and number density fields are set!")
+        return None,0
     
 
-    if rank ==0 : print(f"Loading data from {paths}")
+
+
+
+
+
+
+def initialize_particles(stbs, uk = uk,n = n,start_big_particle = start_big_particle,path = None):
+    if start_big_particle:
+        if rank ==0 : print("Starting big particles from scratch")
+        # ––––––––––––––––––- calculating Q ––––––––––––––––––- #
+        u[0] = irfft_mpi(uk[0]*phase_k*dealias, u[0])
+        u[1] = irfft_mpi(uk[1]*phase_k*dealias, u[1])
+        u[2] = irfft_mpi(uk[2]*phase_k*dealias, u[2])
+        
+        rhsu[:] = u[0]*diff_x(u[0],vtemp[0]) + u[1]*diff_y(u[0],vtemp[1]) + u[2]*diff_z(u[0],vtemp[2])
+        rhsv[:] = u[0]*diff_x(u[1],vtemp[0]) + u[1]*diff_y(u[1],vtemp[1]) + u[2]*diff_z(u[1],vtemp[2])
+        rhsw[:] = u[0]*diff_x(u[2],vtemp[0]) + u[1]*diff_y(u[2],vtemp[1]) + u[2]*diff_z(u[2],vtemp[2])
+        
+        Qk = -0.5* (1j*kx*rfft_mpi(rhsu, pk) + 1j*ky*rfft_mpi(rhsv, pk) +1j*kz* rfft_mpi(rhsw, pk) )*conjphase_k*dealias*0.5
+        #? The first 0.5 is coming from the formula. The last one due to phase shift.
+        
+        u[0] = irfft_mpi(uk[0]*dealias, u[0])
+        u[1] = irfft_mpi(uk[1]*dealias, u[1])
+        u[2] = irfft_mpi(uk[2]*dealias, u[2])
+        
+        rhsu[:] = u[0]*diff_x(u[0],vtemp[0]) + u[1]*diff_y(u[0],vtemp[1]) + u[2]*diff_z(u[0],vtemp[2])
+        rhsv[:] = u[0]*diff_x(u[1],vtemp[0]) + u[1]*diff_y(u[1],vtemp[1]) + u[2]*diff_z(u[1],vtemp[2])
+        rhsw[:] = u[0]*diff_x(u[2],vtemp[0]) + u[1]*diff_y(u[2],vtemp[1]) + u[2]*diff_z(u[2],vtemp[2])
+        
+        Qk += -0.5* (1j*kx*rfft_mpi(rhsu, pk) + 1j*ky*rfft_mpi(rhsv, pk) +1j*kz* rfft_mpi(rhsw, pk) )*dealias*0.5
+
+        Q = irfft_mpi(Qk, ntemp)
+        # –––––––––––––––––––––––––––––––––––––-–––––––––––––––– #
+        
+        # ––––––––––––––––––- creating Q masks ––––––––––––––––––- #
+        
+        
+        
+        Qmax = comm.allreduce(np.max(Q),op = MPI.MAX)
+        Qmin = comm.allreduce(np.min(Q),op = MPI.MIN)
+        Qpos = Q>0
+        Qneg = Q<0
+        Qpostot = comm.allreduce(Qpos.sum(),op  = MPI.SUM)
+        Qnegtot = comm.allreduce(Qneg.sum(),op  = MPI.SUM)
+        
+        def calc_maxmin10_percentile(Q, Qmin, Qmax, frac=0.1, nbins=20000):
+            edges = np.linspace(Qmin, Qmax, nbins + 1)
+
+            local_hist, _ = np.histogram(Q, bins=edges)
+            hist = comm.allreduce(local_hist, op=MPI.SUM)
+            total = comm.allreduce(np.sum(Q>= Qmin),op = MPI.SUM)
+
+            cdf = np.cumsum(hist) / total
+            mask = np.concatenate(([True], np.diff(cdf) > 0)) #* useful code to only take monotonically increasing function.
+            fit = PchipInterpolator(cdf[mask],edges[1:][mask])
+
+            return fit(frac), fit(1-frac)
+
+        Qlow10,Qhigh10  = calc_maxmin10_percentile(Q,Qmin,Qmax)
+
+        
+        countup10 = comm.allreduce(np.sum(Q>=Qhigh10),op = MPI.SUM)
+        countlow10 = comm.allreduce(np.sum(Q<Qlow10),op = MPI.SUM)
+        if (countup10 <  Nprtcl).any() :   raise SystemExit(f"Need more percentile!")
+            
+        
+        Qpos10 = Q>=Qhigh10
+        Qlow10 = Q< Qlow10
+        
+        mask = (Qpos,Qneg,Qpos10,Qlow10)
+        # –––––––––––––––––––––––––––––––––––––––––––––––––––––––– #
+        
+        
+        for jj in range(len(stb_s[:uniquestbs])):
+            for i in range(1,5):
+                stb = stbs[jj + i*uniquestbs]
+                ind1, ind2,ind3 = np.where(mask[i-1]) #! -1  to ensure the first index is 0. 
+                masktot = comm.allreduce(mask[i-1].sum(),op = MPI.SUM)
+                
+                nprtcl_to_choose = int((mask[i-1].sum()/masktot) * (Nprtcl[jj + i*uniquestbs])) #! The number of particles to choose in the given rank. 
+                tot_nprtcl_chosen = comm.allreduce(nprtcl_to_choose,op = MPI.SUM)
+                remainder =  Nprtcl[jj + i*uniquestbs] - tot_nprtcl_chosen
+                maskarray = comm.allgather(mask[i-1].sum())
+                
+                ranksorted = np.arange(num_process)[np.argsort(maskarray)[::-1]]
+                if rank in ranksorted[:remainder]: nprtcl_to_choose += 1
+                 
+                offset = comm.scan(nprtcl_to_choose, op=MPI.SUM) -  nprtcl_to_choose 
+                    
+                stb.coord = np.zeros((int(nprtcl_to_choose),stb.coord.shape[-1]))
+                if nprtcl_to_choose >0:
+                    stb.coord[:,0] = np.random.choice(X[ind1.ravel()],size = nprtcl_to_choose,replace = False) 
+                    stb.coord[:,1] = np.random.choice(Y[ind2.ravel()],size = nprtcl_to_choose,replace = False) 
+                    stb.coord[:,2] = np.random.choice(Z[ind3.ravel()],size = nprtcl_to_choose,replace = False) 
+                    stb.prtclid = offset +  np.arange(nprtcl_to_choose).reshape(-1,1)
+        
+        for  jj in range(len(stb_s)):
+            stb = stbs[jj]
+            stb.interpmat = np.zeros((stb.coord.shape[0], stb.interpmat.shape[1]))
+            stb.interpmat = stb.interp_cosine(stb.coord,np.concatenate((u,u,n[jj,None,...]), axis = 0))
+            stb.exterpmat = np.zeros((stb.prtclid.shape[0], 1))
+            stb.coord[:,d:2*d] = stb.interpmat[:,:d]
+            stb.coord[:,-1] = stb_s[jj]**1.5*stb.factor
+            stb.update_intrinsic()
+        
+        
     
-    uk[:],n[:] = load_npz(paths,uk, n,loadn = loadn)
     
-    # u,n = load_hdf5(paths,u,n)
-    u[0] = irfft_mpi(uk[0]*dealias, u[0])
-    u[1] = irfft_mpi(uk[1]*dealias, u[1])
-    u[2] = irfft_mpi(uk[2]*dealias, u[2])
-    if not start_big_particle: #! Change this to different ranks.
-        for jj in range(len(stbs)):
+    else: 
+        
+        if path == None: 
+            raise SystemExit("Please provide particle data path or start afresh")
+
+        for jj in range(len(stb_s)):
             stb = stbs[jj]
             stb0 = stb_s[jj]
-            prtcl_data = np.load(paths/f"{wg}_stb_{stb0:.3f}_sts_{tps/tf:.3f}/state_{rank}.npz")
+            prtcl_data = np.load(path/f"{wg}_stb_{stb0:.3f}_sts_{tps/tf:.3f}/state_{rank}.npz")
             stb.coord = np.zeros((prtcl_data["pos"].shape[0], stb.coord.shape[1]))
             stb.interpmat = np.zeros((stb.coord.shape[0], stb.interpmat.shape[1]))
             stb.coord[:,:d] = prtcl_data["pos"]
@@ -731,67 +909,22 @@ if not forcestart:
             stb.prtclid = prtcl_data["prtclid"]
             stb.interpmat[:,:d] = prtcl_data["umat"]
             stb.exterpmat = np.zeros((stb.prtclid.shape[0], 1))
-    
-    else: 
-        for jj in range(len(stbs)):
-            stb = stbs[jj]
-            stb0 = stb_s[jj]
-            stb.interpmat = stb.interp_cosine(stb.coord,np.concatenate((u,u,n[jj,None,...]), axis = 0))
-            stb.coord[:,d:2*d] = stb.interpmat[:,:d]
+            stb.update_intrinsic()
         
-    del paths
     comm.Barrier()
     if rank ==0: print("Data loaded successfully")
-    
-    
+    # raise SystemExit
 
-if forcestart:
-    ## ---------------------- Beginning from start ----------------------------------
+stbs = []
+for i,stb in enumerate(stb_s):
+    
+    #! Initializing only the first n particles as they would be randomly distributed in the domain. The rest will be appended. 
+    stbs.append(MPI_particles(comm, L, N, Nprtcl[i],sts, stb,g,nu, tf,rhop,M0 ,d,X,Y,Z, x,y,z)) 
+    stbs[i].to_interp(2*d+1) # u, v_s and c_s
+    stbs[i].to_exterp(1)
 
-    kinit = 31 # Wavenumber of maximum non-zero initial pressure mode.    
-    thu = np.random.uniform(0, TWO_PI,  k.shape)
-    thv = np.random.uniform(0, TWO_PI,  k.shape)
-    thw = np.random.uniform(0, TWO_PI,  k.shape)
-
-    # eprofile = 1/np.where(kint ==0, np.inf,kint**(2.0))/normalize
-    eprofile = kint**2*np.exp(-kint**2/2)/normalize
-    
-    
-    amp = (eprofile/np.where(kint == 0, np.inf, kint**2))**0.5
-    
-    uk[0] = amp*np.exp(1j*thu)*(kint**2<kinit**2)*(kint>0)*dealias
-    uk[1] = amp*np.exp(1j*thv)*(kint**2<kinit**2)*(kint>0)*dealias
-    uk[2] = amp*np.exp(1j*thw)*(kint**2<kinit**2)*(kint>0)*dealias
-    
-    u[0] = irfft_mpi(uk[0], u[0])
-    u[1] = irfft_mpi(uk[1], u[1])
-    u[2] = irfft_mpi(uk[2], u[2])
-    
-    uk[0] = rfft_mpi(u[0],uk[0])
-    uk[1] = rfft_mpi(u[1],uk[1])
-    uk[2] = rfft_mpi(u[2],uk[2])
-    
-    trm = (kx*uk[0]  + ky*uk[1] + kz*uk[2])
-    uk[0] = uk[0] + invlap*kx*trm
-    uk[1] = uk[1] + invlap*ky*trm
-    uk[2] = uk[2] + invlap*kz*trm
-    
-    ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
-    ek_arr0 = comm.allreduce(e3d_to_e1d(ek),op = MPI.SUM) #! This is the shell-summed ek a
-    # if rank ==0: print(ek_arr0, np.sum(ek_arr0))
-    e0 = np.sum(ek_arr0)
-    uk[0] = uk[0] *(einit/e0)**0.5
-    uk[1] = uk[1] *(einit/e0)**0.5
-    uk[2] = uk[2] *(einit/e0)**0.5
-    
-    
-    u[0] = irfft_mpi(uk[0], u[0])
-    u[1] = irfft_mpi(uk[1], u[1])
-    u[2] = irfft_mpi(uk[2], u[2])
-    
-    tinit = 0.
-    n[:] = 1.0
-    
+path, tinit = initialize_fields(forcestart)
+initialize_particles(stbs,uk,n,start_big_particle,path)
 
 
 ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
@@ -804,31 +937,37 @@ ek_arr0[shell_no[-1] + 1:] = 0.
 divmax = comm.allreduce(np.max(np.abs( diff_x(u[0],  rhsu) + diff_y(u[1],rhsv) + diff_z(u[2],rhsw))),op = MPI.MAX)
 if rank ==0 : print(f" max divergence {divmax}")
 
-#----------------- The initial energy ------------------
+#––––––––––––––––- The initial energy ––––––––––––––––––
 e0 = comm.allreduce(0.5*dx*dy*dz*np.sum(u[0]**2 + u[1]**2 + (u[2]**2)),op = MPI.SUM)
-nmean = comm.allreduce(n.sum(),op =MPI.SUM)/N**3
-nmax = comm.allreduce(n.max(),op =MPI.MAX)
-nmin = comm.allreduce(n.min(),op =MPI.MIN)
-if rank ==0 : print(f"Initial Physical space energy: {e0}, mean max and min of n  {nmean}, {nmax} , {nmin}")
-#-------------------------------------------------------
+if rank == 0: print(f"Initial Physical space energy: {e0}")
+#––––––––––––––––––––––––––––––––––––––––––––––––––––––-
+if rank == 0:
+    print(f"{'Stokes':>10} {'Mass':>12} {'Nprtcl':>10} {'Nprtcl_th':>10} {'MassFrac':>10} {'MassFrac_th':>12} {'nmax':>10} {'nmin':>10} {'nmean':>10}")
 for i,stb in enumerate(stbs):
+    nmean = comm.allreduce(n[i].sum(),op =MPI.SUM)/N**3
+    nmax = comm.allreduce(n[i].max(),op =MPI.MAX)
+    nmin = comm.allreduce(n[i].min(),op =MPI.MIN)
     tot_mass = comm.allreduce(np.sum(stb.coord[:,-1]),op = MPI.SUM)
-    if rank ==0: print(f"Inital mass for {stb_s[i]} stokes is {tot_mass}, with mass fraction {tot_mass/(n[i]*TWO_PI**3).mean()}, theoretical mass fraction {5/72}")
+    tot_prtcl = comm.allreduce(stb.coord[:,-1].size, op = MPI.SUM)
+    nmean
+    if rank ==0 : 
+        print(f"{stb_s[i]:>10} {tot_mass:>12.4g} {tot_prtcl:>10} {Nprtcl[i]:>10} "
+              f"{tot_mass / (nmean * TWO_PI**3):>10.4g} {5/72:>12.4g} {nmax:>10.4g} {nmin:>10.4g} {nmean:>10.4g}")
 # raise SystemExit
-# --------------------------------------------------
+# ––––––––––––––––––––––––––––––––––––––––––––––––––
 
-## ----- executing the code -------------------------
+## ––––- executing the code ––––––––––––––––––––––––-
 t = np.arange(tinit,T+ 0.5*dt, dt)
 # t = np.arange(tinit,10*dt, dt)
 # print(len(t))
 t1 = time()
 evolve_and_save(t,u,n)
 t2 = time() - t1 
-# --------------------------------------------------
+# ––––––––––––––––––––––––––––––––––––––––––––––––––
 if rank ==0: print(t2)
-## --------- saving the calculation time -----------
+## ––––––––- saving the calculation time ––––––––––-
 if rank ==0: 
     with open(savePath/f"calcTime.txt","a") as f:
         f.write(str({f"time taken to run from {tinit} to {T} is": t2}))
-## --------------------------------------------------
+## ––––––––––––––––––––––––––––––––––––––––––––––––––
 

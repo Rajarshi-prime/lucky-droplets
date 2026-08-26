@@ -288,21 +288,21 @@ def forcing(uk,fk):
     
      
 def clip_zero(x):
-    # """Clips negative values to zero and rescales the to conserve the mean
-    # """
-    # oldmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
-    # x[:] = np.clip(x,0,None)
-    # newmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
-    
-    # return x*oldmean/newmean
-
-    """Clips values between zero and nmin_thresh to zero and and rescales the to conserve the mean
+    """Clips negative values to zero and rescales the to conserve the mean
     """
     oldmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
-    x[:] = np.where(x<nmin_thresh,0,x)
+    x[:] = np.clip(x,0,None)
     newmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
     
     return x*oldmean/newmean
+
+    # """Clips values between zero and nmin_thresh to zero and and rescales the to conserve the mean
+    # """
+    # oldmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
+    # x[:] = np.where(x<nmin_thresh,0,x)
+    # newmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
+    
+    # return x*oldmean/newmean
 
 def full_RHS(t,uk, n,ku =ku,kn = kn,visc = 1,forc = 1,rhsu = rhsu, rhsv = rhsv, rhsw = rhsw, rhsuk = rhsuk, rhsvk = rhsvk, rhswk = rhswk,divvnk = divvnk,nk = nk, vn = vn, ):
     ## The RHS terms of u, v and w excluding the forcing and the hypervisocsity term 
