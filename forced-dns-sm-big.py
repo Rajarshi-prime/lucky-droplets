@@ -905,8 +905,8 @@ def initialize_particles(stbs, uk = uk,n = n,start_big_particle = start_big_part
                 cond = lambda x: (x[:,0]>=rstart)*(x[:,0]<rend)
                 #* the rank contains particles in [rstart,rend)
                 load_num_slabs = len([x for x in (paths).iterdir() if "Fields" in str(x) and ".npz" in str(x)])
-                data_rank_start = int(round(rstart/(L)*load_num_slabs,0))
-                data_rank_end = int(round(rend/(L)*load_num_slabs,0))
+                data_rank_start = int(np.floor(rstart/(L)*load_num_slabs))
+                data_rank_end = int(np.ceil(rend/(L)*load_num_slabs))
                 for jj in range(len(stb_s)):
                     stb = stbs[jj]
                     if Nprtcl[jj] > 0:
