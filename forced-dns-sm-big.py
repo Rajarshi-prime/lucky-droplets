@@ -790,7 +790,7 @@ def initialize_fields(forcestart=forcestart):
 
 
 
-def initialize_particles(stbs, uk = uk,n = n,start_big_particle = start_big_particle,path = None):
+def initialize_particles(stbs, uk = uk,n = n,start_big_particle = start_big_particle,paths = None):
     if start_big_particle:
         if rank ==0 : print("Starting big particles from scratch")
         # ––––––––––––––––––- calculating Q ––––––––––––––––––- #
@@ -851,9 +851,10 @@ def initialize_particles(stbs, uk = uk,n = n,start_big_particle = start_big_part
             
         
         Qpos10 = Q>=Qhigh10
-        Qlow10 = Q< Qlow10
+        Qneg10 = Q< Qlow10
         
-        mask = (Qpos,Qneg,Qpos10,Qlow10)
+        mask = (Qpos,Qneg,Qpos10,Qneg10)
+
         # –––––––––––––––––––––––––––––––––––––––––––––––––––––––– #
         
         
@@ -894,22 +895,42 @@ def initialize_particles(stbs, uk = uk,n = n,start_big_particle = start_big_part
     
     else: 
         
-        if path == None: 
+        if paths == None: 
             raise SystemExit("Please provide particle data path or start afresh")
+        
+        else: 
+            if stbs is not None:
+                rstart = X[sx][0]
+                rend = X[sx][-1] + dx 
+                cond = lambda x: (x[:,0]>=rstart)*(x[:,0]<rend)
+                #* the rank contains particles in [rstart,rend)
+                load_num_slabs = len([x for x in (paths).iterdir() if "Fields" in str(x) and ".npz" in str(x)])
+                data_rank_start = int(round(rstart/(L)*load_num_slabs,0))
+                data_rank_end = int(round(rend/(L)*load_num_slabs,0))
+                for jj in range(len(stb_s)):
+                    stb = stbs[jj]
+                    if Nprtcl[jj] > 0:
+                        dir_b = paths / f"{wg}_stb_{stb_s[jj]:.3f}_sts_{tps/tf:.3f}_init_{init_name[jj]}"
+                        parts = []
+                        pids  = []
+                        for r in range(data_rank_start, data_rank_end):
+                            p = np.load(dir_b / f"state_{r}.npz")
+                            mask = cond(p["pos"])
+                            if mask.shape[0] > 0:
+                                coord = np.concatenate([p["pos"][mask], p["vel"][mask], p["mass"][mask, None]], axis=1)
+                                parts.append(coord)
+                                pids.append(p["prtclid"][mask])
+                            
+                        if len(parts)>0:
+                            stb.coord   = np.concatenate(parts, axis=0)
+                            stb.prtclid = np.concatenate(pids,  axis=0)
+                        else: 
+                            stb.coord = np.zeros((0,2*d + 1))
+                            stb.prtclid = np.zeros((0,1))
+                        stb.interpmat = np.zeros((stb.coord.shape[0], stb.interpmat.shape[1]))
+                        stb.exterpmat = np.zeros((stb.prtclid.shape[0], 1))
+                        stb.update_intrinsic()
 
-        for jj in range(len(stb_s)):
-            stb = stbs[jj]
-            stb0 = stb_s[jj]
-            prtcl_data = np.load(path/f"{wg}_stb_{stb0:.3f}_sts_{tps/tf:.3f}/state_{rank}.npz")
-            stb.coord = np.zeros((prtcl_data["pos"].shape[0], stb.coord.shape[1]))
-            stb.interpmat = np.zeros((stb.coord.shape[0], stb.interpmat.shape[1]))
-            stb.coord[:,:d] = prtcl_data["pos"]
-            stb.coord[:,d:2*d] = prtcl_data["vel"]
-            stb.coord[:,-1] = prtcl_data["mass"]
-            stb.prtclid = prtcl_data["prtclid"]
-            stb.interpmat[:,:d] = prtcl_data["umat"]
-            stb.exterpmat = np.zeros((stb.prtclid.shape[0], 1))
-            stb.update_intrinsic()
         
     comm.Barrier()
     if rank ==0: print("Data loaded successfully")
