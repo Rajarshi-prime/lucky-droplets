@@ -39,13 +39,14 @@ dt_save = 0.5
 st = round(dt_save/dt) #!Savestep : Confusing
 sts = 0.001
 stb_s = [0.017,0.017/4, 0.017*4,0.017*6.35]*5 #! For 5 different initial conditions.
-init_name = ['random']*5 + ['Qpos']*5 + ['Qneg']*5 + ['Qpos_high']*5 + ['Qneg_high']*5
 uniquestbs = len(np.unique(stb_s))
+init_name = ['random']*uniquestbs + ['Qpos']*uniquestbs + ['Qneg']*uniquestbs + ['Qpos_high']*uniquestbs + ['Qneg_high']*uniquestbs
 if uniquestbs !=4 : raise SystemExit("Check the initial big Stokes numbers")
 # stb_s = [0.017/4,0.017/9]
-stb_s.sort()
+# stb_s.sort()
 stb_s= np.array(stb_s)
 Nprtcl = np.round(8192*(0.017/stb_s)**1.5).astype(np.int32) #! 10240 0.017 St particles.
+
 if rank ==0: print(f"Stokes numbers:{stb_s}, number of particles : {Nprtcl}")
 # if rank ==0 : print(f"prtcl per rank : {Nprtcl//num_process}")
 # raise SystemExit 
@@ -557,6 +558,7 @@ def save(i,tt,uk,n,stbs,tf = tf, tps = tps):
             new_dir_b = new_dir/f"{wg}_stb_{stb_s[jj]:.3f}_sts_{tps/tf:.3f}_init_{init_name[jj]}"
             try: new_dir_b.mkdir(parents=True,  exist_ok=True)
             except FileExistsError: pass
+            comm.Barrier()
             
             stb = stbs[jj]
             stb.coord,[stb.interpmat,stb.exterpmat,stb.prtclid] = stb.send(stb.coord,[stb.interpmat,stb.exterpmat,stb.prtclid])
@@ -620,7 +622,7 @@ def evolve_and_save(t,  u,n):
     while tt <= t[-1]:
 
         calc_time += time() - t3
-        if rank == 0:  print(f"step {i} in time {time() - t3}", end= '\r')
+        if rank == 0:  print(f"step {i} in time {time() - t3}", end= '\r',file = sys.stderr)
         ## ––––––––––––- saving the data –––––––––––––––––––– ##
         if abs(np.sin(tt/dt_save*PI)) - np.sin(0.5*h/dt_save*PI) < 1e-12:
             save(i,tt,uk,n,stbs)
