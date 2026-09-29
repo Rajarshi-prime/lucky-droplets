@@ -27,6 +27,10 @@ eta = m/kmax
 rs = eta*(9*sts/2/rhop)**0.5 
 nprtcls0 = 3*M0*Twith_PI**3/(rhop * 4 * PI *rs**3)
 rs,Twith_PI/N,nprtcls0
+nu0 = 0.59
+lp = 1
+nu = nu0*(eta)**(2*(lp - 1/3)) 
+tf =eta**2/nu
 
 #%%
 stb_s,Nprtcl
@@ -47,250 +51,6 @@ kx,  ky,  kz = np.meshgrid(Kx,  Ky,  Kz,  indexing = 'ij')
 k = (kx**2 + ky**2 + kz**2)**0.5
 shells = np.arange(-0.5,Nf, 1.)
 normalize = np.where((kz== 0) + (kz == N//2) , 1/(N**6/Twith_PI**3),2/(N**6/Twith_PI**3))
-
-def e3d_to_e1d(x):  return np.histogram(k.ravel(),bins = shells,weights=x.ravel())[0]  #1 Based on whether k is 2D or 3D, it will bin the data accordingly. 
-#%%
-nmin = Twith_PI**3/nprtcls0/(dx*dy*dz)
-nmin
-#%%
-def find_s(n,target = 1):
-    '''Creting the h(s) function by choosing different s'''
-    s = np.linspace(-n.max(),n.max(),20)
-    hs = s*0.0
-    for i in range(s.size):
-        hs[i] = np.mean(np.clip(s[i] + n[...]  ,0,None)) - target
-    spl = CubicSpline(s, hs)
-    dspl = spl.derivative()
-    s0 = 0.0
-    sstar = newton(spl, s0, fprime=dspl)
-    return sstar
-    
-# %%
-nold_clip = np.zeros((N,N,N))
-nnew_clip = np.zeros((N,N,N))
-nthresh_clip = np.zeros((N,N,N))
-nlog_clip = np.zeros((N,N,N))
-nno_clip = np.zeros((N,N,N))
-
-ns = (nold_clip,nnew_clip,nthresh_clip,nlog_clip,nno_clip)
-nspectra = [] 
-paths = ("/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_256_Re_398.1/last/wo_g_sts_0.001/",
-"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine_clip_new/forced_True/N_256_Re_398.1/last/wo_g_sts_0.001/",
-"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine_thresh_clip/forced_True/N_256_Re_398.1/last/wo_g_sts_0.001/",
-"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_256_Re_398.1/last/wo_g_sts_0.001_log/",
-"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine_nocap/forced_True/N_256_Re_273.5/last/wo_g_sts_0.001/"    
-)
-names = ["old", "new", "thresh", "log", "nocap"]
-
-
-for i in range(5):
-    load_num_slabs = len([i for i in os.listdir(paths[i]) if "n_" in i])
-    data_per_rank = N//load_num_slabs
-    rank_data = range(0,N) # The rank contains these slices 
-    slab_old = np.inf
-    n = ns[i]
-    for lidx,j in enumerate(rank_data):
-        print(lidx,end = '\r')
-        slab = j//data_per_rank
-        idx = j%data_per_rank
-            
-            # print(f"Rank {rank} is loading slab {slab} and idx {idx}")
-            
-        """Loading the truncated data"""
-        
-        if slab_old != slab:
-            data = paths[i] + f"n_{slab}.npz"
-        slab_old = slab
-          
-        n[lidx] = np.load(data)['n'][idx]  
-
-    nkact = rfftn(n,axes = (-3,-2,-1))
-    nspectra.append(e3d_to_e1d(np.abs(nkact)**2*normalize))
-    slab_old = slab
-
-#%%
-ntest = np.zeros((N,N,N))
-for rank in range(N):
-    ntest[rank] = np.load(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine_clip_new/forced_True/N_256_Re_398.1/last/wo_g_sts_0.001/n_{rank}.npz")['n']
-#%%
-ns[-1].mean(),ns[-1].std(), ns[-1].max(), ns[-1].min()
-#%%
-def clip_zero(n,target = 1):
-    # """Clips negative values to zero and rescales the to conserve the mean
-    # """
-    # oldmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
-    # x[:] = np.clip(x,0,None)
-    # newmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
-    '''Creting the h(s) function by choosing different s and then finding sstar. Returning the clipped sstar'''
-    if np.abs((np.clip(n,0,None) - n).sum()/N**3) < 1e-8:
-        return n
-    nmax = np.max(np.abs(n))
-    s = np.linspace(-nmax,nmax,20)
-    hs = s*0.0
-    for i in range(s.size):
-        ss = np.clip(s[i ] + n  ,0,None).sum()/N**3 - target
-        hs[i] = ss
-
-
-    tck = splrep(s, hs, k=5)
-    spl = lambda x: splev(x, tck)
-    s0 = 0
-    a, b = sorted([s0, s[0]])
-    sstar = brentq(spl, a, b, xtol=1e-10)
-    print(sstar)
-    return np.clip(sstar + n, 0, None)
-#%%
-nsclipped = clip_zero(ns[-1])
-print(np.abs(nsclipped - ns[-1]).max())
-# nnew= np.clip(sstar + n[None,...]  ,0,None)
-# nmine = np.clip(n,0,None)
-# nmine *= np.mean(n)/np.mean(nmine)
-# %%
-nsclipped.mean(),nsclipped.std(), nsclipped.max(), nsclipped.min() 
-#%%
-nkact = rfftn(n,axes = (-3,-2,-1))
-nspectra= e3d_to_e1d(np.abs(nkact)**2*normalize)
-# nknew = rfftn(nnew,axes = (-3,-2,-1))
-# nspectra_new= e3d_to_e1d(np.abs(nknew)**2*normalize)
-# nkmine = rfftn(nmine,axes = (-3,-2,-1))
-# nspectra_mine= e3d_to_e1d(np.abs(nkmine)**2*normalize)
-#%%
-# theshold_spectra =  nspectra
-# new_clip_spectra =  nspectra
-# og_clip_spectra = nspectra
-#%%
-mpl.rcParams.update({
-
-    # ===================== LaTeX =====================
-    "text.usetex": True,
-
-    "text.latex.preamble": r"""
-        % \usepackage{upmath}
-        \usepackage{amsmath}
-        \usepackage{amssymb}
-    """,
-
-    "font.family": "serif",
-
-    # # ===================== FONTS =====================
-    # "font.family": "serif",
-    # "font.serif": ["ztm"],   # Nimbus Roman No9 L alias
-    # # "mathtext.fontset": "stix",
-
-
-    # ===================== SIZES =====================
-    "font.size": 15,
-    "axes.labelsize": 16,
-    "axes.titlesize": 17,
-
-    # ===================== LINES =====================
-    "lines.linewidth": 2.5,
-
-    # ===================== AXES =====================
-    "axes.linewidth": 1.3,
-
-    # ===================== TICKS =====================
-    "xtick.direction": "in",
-    "ytick.direction": "in",
-    "xtick.top": True,
-    "ytick.right": True,
-
-    "xtick.major.size": 6,
-    "ytick.major.size": 6,
-    "xtick.minor.size": 3,
-    "ytick.minor.size": 3,
-
-    "xtick.minor.visible": True,
-    "ytick.minor.visible": True,
-    "xtick.major.pad": 6,
-    "ytick.major.pad": 6,
-
-    # ===================== LEGEND =====================
-    "legend.frameon": False,
-})
-#%%
-names = ["old", "new", "thresh", "log", "nocap"]
-k1d =np.arange(nspectra[0].size)
-colors = ["#0072B2", "#E69F00", "#009E73", "#CC79A7", "#D55E00"]
-items = list(zip(names, nspectra, colors))
-right_items = items[:-2] + items[-1:]
-
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
-
-for ax, subset in zip([ax1, ax2], [items, right_items]):
-    for label, spectra, col in subset:
-        ax.loglog(k1d[1:], (k1d**(-2.0) * spectra)[1:], c=col, label=label, lw=3.0)
-    ax.set_xlabel(r"$k$")
-    ax.set_ylabel(r"$k^{-2}|\hat{n}(k)^2|$")
-    ax.set_ylim(1e-6,None)
-    ax.set_xlim(1,None)
-
-handles, labels = ax1.get_legend_handles_labels()
-fig.legend(handles, labels, ncol=5, handlelength=0.5, loc='upper center',
-           bbox_to_anchor=(0.5, 1.1), handletextpad=0.2, frameon=True)
-
-plt.tight_layout()
-#%%
-(ns[-1]<0).sum()/(N**3)
-#%%
-k1d =np.arange(nspectra.size)
-plt.loglog(k1d[1:],(theshold_spectra)[1:],c = 'b', label = '1 prtcl thresh')
-plt.loglog(k1d[1:],(og_clip_spectra)[1:],c = 'r',label = 'OG_clipping')
-plt.xlabel('k')
-plt.ylabel(r'$|\hat{n}(k)|^2$')
-plt.legend(ncols = 3,handlelength = 1, loc = 'lower left')
-plt.xlabel(r"$k$")
-plt.ylabel(r"$|\hat{n}(k)}^2$")
-#%%
-s, hs = create_h(n)
-plt.plot(s,hs, '.')
-print(s,hs)
-#%%
-p1 = plt.imshow(n[30],cmap = 'Greys', origin = "lower",vmin = 0)
-plt.colorbar(p1)
-#%%
-npdf, nbins = np.histogram(n.ravel(), bins = np.logspace(-10,10,201))
-plt.plot(nbins[1:],npdf)
-plt.xscale('log')
-plt.yscale('log')
-#%%
-# n = np.zeros((N,N,N))
-# # t = 30.0
-# num_process_load = 128
-# for i in range(num_process):
-#     data = f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_256_Re_398.1/last/wo_g_sts_0.001_log/n_{i}.npz"
-#     print(np.load(data)['n'].shape)
-#     n[i*Np:(i+1)*Np] = np.load(data)['n']
-
-# #%%
-# nspectra_loaded = np.load(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_256_Re_398.1/last/n_spectrum.npz")['nk']
-#%%
-
-nk = rfftn(n,axes = (-3,-2,-1))
-nspectra = e3d_to_e1d(np.abs(nk)**2*normalize)
-nspectra.sum(), (n**2).sum()*dx*dy*dz
-# with h5py.File(f"./comparing_spectra.hdf5","a") as f:
-#     f.create_dataset('nspectra_1003.2',data = nspectra, dtype = np.float64)
-
-# #%%
-k1d =np.arange(nspectra.size)
-plt.loglog(k1d[1:],(nspectra)[1:])
-# plt.loglog(k1d[1:],(2*nspectra_loaded/(N**6/Twith_PI**3))[1:])
-#%%
-with h5py.File(f"./comparing_spectra.hdf5","r") as f:
-    nspectra_398 = f['nspectra_log_398.1'][:]
-    nspectra_271 = f['nspectra_271.4'][:]
-    nspectra_1003 = f['nspectra_1003.2'][:]
-k1d =np.arange(nspectra_398.size)
-plt.loglog(k1d[1:],(nspectra_398)[1:],'.-',label = 'log_398.1')
-plt.loglog(k1d[1:],(nspectra_271)[1:],'.-',label = '271.4')
-plt.loglog(k1d[1:],(nspectra_1003)[1:],'.-',label = '1003.2')
-plt.legend()
-# #%%
-# plt.plot(n[0,0],'.-')
-# # %%
-# p1 = plt.imshow(n[10,],origin = 'lower', cmap = 'Greys',vmin = 0)
-# plt.colorbar(p1)
 
 #%%
 # names = ["","highn/","highhighn/","synthetic/"]
@@ -362,7 +122,7 @@ def load_and_plot(nami,ax,xs,ys,dets,down_lim,up_lim):
         #     times = np.array(list(np.arange(0,1.95,0.1)) +  list(np.arange(2,40.1,0.5)))
         # else: 
         #     times = np.arange(0,40.1,0.5)
-        # times = np.arange(0,7.2,0.5)
+        times = np.arange(0,5.6,0.5)
         Ntimes = len(times)
         prtcl_mass = np.zeros((Ntimes,Nprtcl[kk]))
         prtcl_id = np.zeros((Ntimes,Nprtcl[kk]))
@@ -411,20 +171,99 @@ def load_and_plot(nami,ax,xs,ys,dets,down_lim,up_lim):
 
 #%%
 mpl.rcParams['text.usetex'] =  True
-fig, axs = plt.subplots(1,len(names), figsize = (7,1.5),dpi = 300,sharex = True)
+fig, axs = plt.subplots(1,len(names), figsize = (9,1.5),dpi = 300,sharex = True)
+xs, ys, dets,up_lim,down_lim = [], [], [],[], []
 for nami in range(len(names)):
     # continue
-    xs, ys, dets,up_lim,down_lim = [], [], [],[], []
     load_and_plot(nami,axs[nami],xs,ys,dets,down_lim,up_lim)
 axs[-1].legend(ncols = 4, handlelength= 1, frameon = False, loc= "upper center",bbox_to_anchor = (-1.3,1.5))
 axs[0].set_ylabel(r'$M_b/M_b(t = 0)$')
+for ax in axs:
+    ax.set_ylim(0,2)
 fig.suptitle(fr"$St_s = {sts:.3f}$",y = -0.2)
 # fig.tight_layout()
 
-#%% 
-np.savez_compressed("")
 #%%
+cols_st = ["#390099","#9e0059","#ff0054","#ff5400","#ffbd00"]
+def load_and_plot_st(kk, stb, ax, xs, ys, dets, down_lim, up_lim):
+    times = np.arange(0, 15.1, 0.5)
+    Ntimes = len(times)
 
+    for nami, name in enumerate(names):
+        prtcl_mass = np.zeros((Ntimes, Nprtcl[kk]))
+        prtcl_id   = np.zeros((Ntimes, Nprtcl[kk]))
+
+        for i, t in enumerate(times):
+            prtcl_count = 0
+            num_process = len([f for f in os.listdir(prtcl_path(t, stb, name)) if "state_" in f])
+            print(f"St = {stb:.3f}, t = {t:.1f}, name = {name}, nproc = {num_process}", end="\r")
+
+            for rank in range(num_process):
+                data = np.load(prtcl_path(t, stb, name) / f"state_{rank}.npz")
+                sl = slice(prtcl_count, prtcl_count + data['prtclid'].shape[0])
+                prtcl_id[i, sl]   = data['prtclid'].ravel()
+                prtcl_mass[i, sl] = data['mass']
+                prtcl_count += data['prtclid'].shape[0]
+
+            idx = np.argsort(prtcl_id[i])
+            prtcl_id[i]   = prtcl_id[i, idx]
+            prtcl_mass[i] = prtcl_mass[i, idx]
+
+        tot_mass = prtcl_mass.sum(axis=1)
+        std_mass = np.std(prtcl_mass / prtcl_mass[0], axis=1)
+
+        ax.plot(times, tot_mass / tot_mass[0], '-', color=cols_st[nami], label=name)
+        # ax.fill_between(times,tot_mass / tot_mass[0] - std_mass,tot_mass / tot_mass[0] + std_mass,color=cols_st[nami], alpha=0.3, lw=0)
+
+        xs.append(times)
+        ys.append(tot_mass)
+        down_lim.append(tot_mass - std_mass)
+        up_lim.append(tot_mass + std_mass)
+
+    ax.set_xlabel(r'$t$')
+    ax.set_title(fr'$St_b/St_s = {stb/sts:.1f}$')
+    
+
+#%%
+mpl.rcParams['text.usetex'] = True
+fig, axs = plt.subplots(1, len(stb_s), figsize=(9, 1.5), dpi=300, sharex=True)
+
+xs, ys, dets, up_lim, down_lim = [], [], [], [], []
+for kk, stb in enumerate(stb_s):
+    load_and_plot_st(kk, stb, axs[kk], xs, ys, dets, down_lim, up_lim)
+
+axs[-1].legend(ncols=len(names), handlelength=1, frameon=False, loc="upper center", bbox_to_anchor=(-1.3, 1.5))
+axs[0].set_ylabel(r'$M_b/M_b(t = 0)$')
+# for ax in axs:
+    # ax.set_yscale('log', base=8)
+    # ax.set_ylim(0, 2)
+fig.suptitle(fr"$St_s = {sts:.3f}$", y=-0.2)
+
+#%%
+mpl.rcParams['text.usetex'] = True
+fig, axs = plt.subplots(1, len(stb_s), figsize=(13, 2), dpi=300, sharex=True)
+
+for kk, stb in enumerate(stb_s):
+    ax = axs[kk]
+    for nami, name in enumerate(names):
+        times = xs[kk*len(names)+ nami]
+        tot_mass = ys[kk*len(names)+nami]
+        name = names[nami]
+        ax.plot(times/tf, tot_mass / tot_mass[0], '-', color=cols_st[nami], label=name)
+        ax.set_xlabel(r'$t/\tau_\eta$')
+        ax.set_title(fr'$St_b/St_s = {stb/sts:.1f}$')
+axs[-1].legend(ncols=len(names), handlelength=1, frameon=False, loc="upper center", bbox_to_anchor=(-1.3, 1.5))
+axs[0].set_ylabel(r'$M_b/M_b(t = 0)$')
+# for ax in axs:
+    # ax.set_yscale('log', base=8)
+    # ax.set_ylim(0, 2)
+fig.suptitle(fr"$St_s = {sts:.3f}$", y=-0.2)
+fig.tight_layout()
+
+#%%
+len(xs)
+
+#%%
 # Ntimes = len(times)
 tot_mass = []
 std_mass = []

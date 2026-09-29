@@ -10,13 +10,12 @@ from particles import MPI_particles
 from scipy.interpolate import PchipInterpolator
 curr_path = pathlib.Path(__file__).parent
 forcestart = False
+start_big_particle = False
 if int(sys.argv[-1]) ==0 :
     gravity = False
 else: 
     gravity = True
-start_big_particle = True
 wg = "with_g" if gravity else "wo_g"
-
 ## ––––––––––––––-MPI things––––––––––––––
 comm = MPI.COMM_WORLD
 num_process =  comm.Get_size()
@@ -34,7 +33,7 @@ N = 256
 dt =  0.2*0.256/N #! Such that increasing resolution will decrease the dt
 dtmax = 5*0.256/N
 dtmin = 0.2*0.256/N
-T = 20
+T = 100
 dt_save = 0.5
 st = round(dt_save/dt) #!Savestep : Confusing
 sts = 0.001
@@ -488,7 +487,7 @@ def load_npz(paths,uk,n,tps = tps, tf = tf,loadn=  True): #! Rewrite
                     n[:,lidx] = nField['n'][idx][None,...]
                 else: 
                     for ii in range(len(stb_s)):
-                        nField = np.load(paths/f"{wg}_sts_{tps/tf:.3f}_stb_{stb_s[ii]:.3f}/n_{slab}.npz")
+                        nField = np.load(paths/f"{wg}_sts_{tps/tf:.3f}_stb_{stb_s[ii]:.3f}_init_{init_name[ii]}/n_{slab}.npz")
                         n[ii,lidx] = nField['n'][idx][None,...]
             else: n[lidx] = 1.0
 
@@ -517,6 +516,7 @@ def load_hdf5(paths, u, n,tps =tps, tf = tf):
     return u,n
 
 def save(i,tt,uk,n,stbs,tf = tf, tps = tps): 
+    # return None
     # div = diff_x(u[0], rhsu) + diff_y(u[1],rhsv) + diff_z(u[2],rhsw)
     # if rank == 0: print(f"Rank {rank} has divergence {np.sum(np.abs(div))}")
     ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
@@ -615,8 +615,8 @@ def evolve_and_save(t,  u,n):
     uk[0] = rfft_mpi(u[0], uk[0])*dealias
     uk[1] = rfft_mpi(u[1], uk[1])*dealias
     uk[2] = rfft_mpi(u[2], uk[2])*dealias
-    i = 0.0
-    tt = 0.0
+    i = 0
+    tt = t[0]
     h = dtmin
     # for i in range(t.size-1):
     while tt <= t[-1]:
@@ -711,13 +711,21 @@ def initialize_fields(forcestart=forcestart):
         
         paths = sorted([x for x in pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}").iterdir() if "time_" in str(x)], key=os.path.getmtime)
         if len(paths) >0 and not start_big_particle: 
-            # paths = paths[-2]
-            paths = paths[0]
+            tlast = [0]*len(stb_s)
+            for jj in range(len(stb_s)):
+                for path in paths[::-1]:
+                    if  f"{wg}_stb_{stb_s[jj]:.3f}_sts_{tps/tf:.3f}_init_{init_name[jj]}" in os.listdir(path): 
+                        tlast[jj] = max(tlast[jj], float(str(path).split("time_")[-1]))
+                        
+            
+            tlast = np.min(tlast) - dt_save #! Loading the second last
+            paths = [path for path in paths if str(tlast) in str(path)][0]
             tinit = float(str(paths).split("time_")[-1])
             
         else: 
             paths = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}/last")
             tinit = 0.
+        if rank ==0 : print(f"tinit is {tinit}")
         issts = [True for i in paths.iterdir() if "sts_" in str(i)]
         loadn = True if len(issts) > 0 else False
         # ––––––––––––––––––- specifying manually –––––––––––––––––––– #
@@ -980,6 +988,7 @@ for i,stb in enumerate(stbs):
 # ––––––––––––––––––––––––––––––––––––––––––––––––––
 
 ## ––––- executing the code ––––––––––––––––––––––––-
+if rank ==0 : print(f"tinit is {tinit}")
 t = np.arange(tinit,T+ 0.5*dt, dt)
 # t = np.arange(tinit,10*dt, dt)
 # print(len(t))

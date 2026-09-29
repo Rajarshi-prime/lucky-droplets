@@ -29,7 +29,7 @@ def _calc_usend_numba(ufield, xidx, yidx,zidx,ypos, zpos,usend, Nprtcl,N , dy , 
 @njit(parallel= True,fastmath = {'nnan', 'ninf', 'nsz', 'arcp', 'contract'}) #! Does not approximate cos
 def _calc_uadd_numba_scalar(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,N,dx, dy,  dz, cosorder, Y, Z):
     
-    for p in prange(Nprtcl):   
+    for p in range(Nprtcl):   
         for i in prange(cosorder):
             indi = i - cosorder//2+1 
             tempyidx = (yidx[p] + indi)%N
@@ -45,7 +45,7 @@ def _calc_uadd_numba_scalar(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,N,dx
 @njit(parallel= True,fastmath = {'nnan', 'ninf', 'nsz', 'arcp', 'contract'}) #! Does not approximate cos
 def _calc_uadd_numba_vector(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,N,dx, dy,  dz, cosorder, Y, Z,comp):
     
-    for p in prange(Nprtcl):   
+    for p in range(Nprtcl):   
         for i in prange(cosorder):
             indi = i - cosorder//2+1 
             tempyidx = (yidx[p] + indi)%N
