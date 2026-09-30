@@ -8,6 +8,7 @@ from time import time
 import pathlib,os,sys,h5py
 from scipy.interpolate import CubicSpline, splrep,splev,splder
 from scipy.optimize import newton,brentq
+from initial_conditions import InitialConditions
 curr_path = pathlib.Path(__file__).parent
 forcestart = True
 if int(sys.argv[-1]) == 0 :
@@ -126,6 +127,7 @@ param["interval of saving indices"] = st
 # savePath = pathlib.Path(f"/home/rajarshi.chattopadhyay/python/3D-DNS/data/samriddhi-tests-euler-spherical-dealias-final/N_{N}")
 re = 1/nu if nu !=0 else "inf"
 savePath = pathlib.Path(f"./data_cosine_clip_new/forced_{isforcing}/N_{N}_Re_{re:.1f}")
+loadPath = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}") #! Where the restart data is read from
 
 if rank == 0:
     print(savePath)
@@ -443,40 +445,6 @@ def load_trunc(x):
     x1[...,cond_ky,:x.shape[-1]] = x.copy()
     return irfftn(x1,(N,N), axes = (-2,-1))
     
-def load_npz(paths,uk,n,tps = tps, tf = tf,loadn=  True): #! Rewrite
-    load_num_slabs = len([x for x in (paths).iterdir() if "Fields" in str(x) and ".npz" in str(x)])
-    data_per_rank = N//load_num_slabs
-    rank_data = range(rank*Np,(rank + 1)*Np) # The rank contains these slices 
-    slab_old = np.inf
-    for lidx,j in enumerate(rank_data):
-        slab = j//data_per_rank
-        idx = j%data_per_rank
-        
-        # print(f"Rank {rank} is loading slab {slab} and idx {idx}")
-        
-        """Loading the truncated data"""
-        if slab_old != slab:  
-            Field = np.load(paths/f"Fields_k_{slab}.npz")
-            if loadn== True:
-
-                nField = np.load(paths/f"{wg}_sts_{tps/tf:.3f}/n_{slab}.npz")
-            
-        slab_old = slab
-        uk[0,:,lidx] = Field['uk'][:,idx]
-        uk[1,:,lidx] = Field['vk'][:,idx]
-        uk[2,:,lidx] = Field['wk'][:,idx]
-        if loadn== True: n[lidx] = nField['n'][idx]
-        else: n[lidx] = 1.0
-
-        """Loading the OG data"""
-        # if slab_old != slab:  Field = np.load(paths/f"Fields_{slab}.npz")
-        # slab_old = slab
-        # u[0,lidx] = Field['u'][idx]
-        # u[1,lidx] = Field['v'][idx]
-        # u[2,lidx] = Field['w'][idx]  
-    return uk, n
-    
-    
 def load_hdf5(paths, u, n,tps =tps, tf = tf):
     with h5py.File(paths/'Fields.hdf5','r+', driver = 'mpio', comm = comm) as f:
         u[0] = f['u'][sx,...][:]
@@ -620,100 +588,14 @@ def evolve_and_save(t,  u,n):
 ## --------------- Initializing ---------------------
 
 
-"""Structure 
-If there exists a folder with the parameter names and has time folders in it. 
-Load the parameters from parameters.txt
-If the parameters match the current code parameters enter the last time folder.
-Finally load the data.
-If not start from scratch."""
+ic = InitialConditions(comm, N, L, d, loadPath, u, uk, n,
+                       kx, ky, kz, k, kint, dealias, invlap, normalize, einit,
+                       rfft_mpi, irfft_mpi, e3d_to_e1d,
+                       wg, tps, tf, dt_save,
+                       mode = "second_last", clip = clip_zero)
 
+paths, tinit = ic.initialize_fields(forcestart)
 
-
-#! Modify the loading process!
-
-if not forcestart:
-    ## ------------------------- Beginning from existing data -------------------------
-    if rank ==0 : print("Found existing simulation! Using last saved data.")
-    """Loading the data from the last time  """    
-    
-    paths = sorted([x for x in pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}").iterdir() if "time_" in str(x)], key=os.path.getmtime)
-    if len(paths) >0: 
-        paths = paths[-2]
-        tinit = float(str(paths).split("time_")[-1])
-    else: 
-        paths = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}/last")
-        tinit = 0.
-    issts = [True for i in paths.iterdir() if "sts_" in str(i)]
-    loadn = True if len(issts) > 0 else False
-    # ------------------- specifying manually ------------------- #
-    # tinit = 20.0
-    # paths = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}/time_{tinit:.1f}")
-    # ------------------------------------------------------------ #
-    
-
-    if rank ==0 : print(f"Loading data from {paths}")
-    
-    uk[:],n[:] = load_npz(paths,uk, n,loadn = loadn)
-    
-    # u,n = load_hdf5(paths,u,n)
-    u[0] = irfft_mpi(uk[0]*dealias, u[0])
-    u[1] = irfft_mpi(uk[1]*dealias, u[1])
-    u[2] = irfft_mpi(uk[2]*dealias, u[2])
-
-
-    del paths
-    comm.Barrier()
-    if rank ==0: print("Data loaded successfully")
-    
-    
-
-if forcestart:
-    ## ---------------------- Beginning from start ----------------------------------
-
-    kinit = 31 # Wavenumber of maximum non-zero initial pressure mode.    
-    thu = np.random.uniform(0, TWO_PI,  k.shape)
-    thv = np.random.uniform(0, TWO_PI,  k.shape)
-    thw = np.random.uniform(0, TWO_PI,  k.shape)
-
-    # eprofile = 1/np.where(kint ==0, np.inf,kint**(2.0))/normalize
-    eprofile = kint**2*np.exp(-kint**2/2)/normalize
-    
-    
-    amp = (eprofile/np.where(kint == 0, np.inf, kint**2))**0.5
-    
-    uk[0] = amp*np.exp(1j*thu)*(kint**2<kinit**2)*(kint>0)*dealias
-    uk[1] = amp*np.exp(1j*thv)*(kint**2<kinit**2)*(kint>0)*dealias
-    uk[2] = amp*np.exp(1j*thw)*(kint**2<kinit**2)*(kint>0)*dealias
-    
-    u[0] = irfft_mpi(uk[0], u[0])
-    u[1] = irfft_mpi(uk[1], u[1])
-    u[2] = irfft_mpi(uk[2], u[2])
-    
-    uk[0] = rfft_mpi(u[0],uk[0])
-    uk[1] = rfft_mpi(u[1],uk[1])
-    uk[2] = rfft_mpi(u[2],uk[2])
-    
-    trm = (kx*uk[0]  + ky*uk[1] + kz*uk[2])
-    uk[0] = uk[0] + invlap*kx*trm
-    uk[1] = uk[1] + invlap*ky*trm
-    uk[2] = uk[2] + invlap*kz*trm
-    
-    ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
-    ek_arr0 = comm.allreduce(e3d_to_e1d(ek),op = MPI.SUM) #! This is the shell-summed ek a
-    if rank ==0: print(ek_arr0, np.sum(ek_arr0))
-    e0 = np.sum(ek_arr0)
-    uk[0] = uk[0] *(einit/e0)**0.5
-    uk[1] = uk[1] *(einit/e0)**0.5
-    uk[2] = uk[2] *(einit/e0)**0.5
-    
-    
-    u[0] = irfft_mpi(uk[0], u[0])
-    u[1] = irfft_mpi(uk[1], u[1])
-    u[2] = irfft_mpi(uk[2], u[2])
-    
-    tinit = 0.
-    n = np.ones_like(n)
-    
 
 
 ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array

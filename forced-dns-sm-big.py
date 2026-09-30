@@ -7,10 +7,10 @@ from mpi4py import MPI
 from time import time
 import pathlib,os,sys,h5py
 from particles import MPI_particles
-from scipy.interpolate import PchipInterpolator
+from initial_conditions import InitialConditions
 curr_path = pathlib.Path(__file__).parent
-forcestart = False
-start_big_particle = False
+forcestart = False #! True : fresh velocity field, False : load the saved fields
+start_big_particle = False #! True : place the big particles afresh, False : load their saved state
 if int(sys.argv[-1]) ==0 :
     gravity = False
 else: 
@@ -35,6 +35,7 @@ dtmax = 5*0.256/N
 dtmin = 0.2*0.256/N
 T = 100
 dt_save = 0.5
+tdec = max(0, int(np.ceil(-np.log10(dt_save)))) #! decimals in the time_ folder names
 st = round(dt_save/dt) #!Savestep : Confusing
 sts = 0.001
 stb_s = [0.017,0.017/4, 0.017*4,0.017*6.35]*5 #! For 5 different initial conditions.
@@ -141,6 +142,7 @@ param["interval of saving indices"] = st
 # savePath = pathlib.Path(f"/home/rajarshi.chattopadhyay/python/3D-DNS/data/samriddhi-tests-euler-spherical-dealias-final/N_{N}")
 re = 1/nu if nu !=0 else "inf"
 savePath = pathlib.Path(f"./data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}")
+loadPath = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}") #! Where the restart data is read from
 
 if rank == 0:
     print(savePath)
@@ -467,45 +469,6 @@ def load_trunc(x):
     x1[...,cond_ky,:x.shape[-1]] = x.copy()
     return irfftn(x1,(N,N), axes = (-2,-1))
     
-def load_npz(paths,uk,n,tps = tps, tf = tf,loadn=  True): #! Rewrite
-    load_num_slabs = len([x for x in (paths).iterdir() if "Fields" in str(x) and ".npz" in str(x)])
-    data_per_rank = N//load_num_slabs
-    rank_data = range(rank*Np,(rank + 1)*Np) # The rank contains these slices 
-    slab_old = np.inf
-    for lidx,j in enumerate(rank_data):
-        slab = j//data_per_rank
-        idx = j%data_per_rank
-        
-        # print(f"Rank {rank} is loading slab {slab} and idx {idx}")
-        
-        """Loading the truncated data"""
-        if slab_old != slab:  
-            Field = np.load(paths/f"Fields_k_{slab}.npz")
-            if loadn== True:
-                if start_big_particle: 
-                    nField = np.load(paths/f"{wg}_sts_{tps/tf:.3f}/n_{slab}.npz")
-                    n[:,lidx] = nField['n'][idx][None,...]
-                else: 
-                    for ii in range(len(stb_s)):
-                        nField = np.load(paths/f"{wg}_sts_{tps/tf:.3f}_stb_{stb_s[ii]:.3f}_init_{init_name[ii]}/n_{slab}.npz")
-                        n[ii,lidx] = nField['n'][idx][None,...]
-            else: n[lidx] = 1.0
-
-        slab_old = slab
-        uk[0,:,lidx] = Field['uk'][:,idx]
-        uk[1,:,lidx] = Field['vk'][:,idx]
-        uk[2,:,lidx] = Field['wk'][:,idx]
-
-
-        """Loading the OG data"""
-        # if slab_old != slab:  Field = np.load(paths/f"Fields_{slab}.npz")
-        # slab_old = slab
-        # u[0,lidx] = Field['u'][idx]
-        # u[1,lidx] = Field['v'][idx]
-        # u[2,lidx] = Field['w'][idx]  
-    return uk, n
-    
-    
 def load_hdf5(paths, u, n,tps =tps, tf = tf):
     with h5py.File(paths/'Fields.hdf5','r+', driver = 'mpio', comm = comm) as f:
         u[0] = f['u'][sx,...][:]
@@ -537,7 +500,7 @@ def save(i,tt,uk,n,stbs,tf = tf, tps = tps):
     # ––––––––––- ––––––––––––––––––––––––––––
     #                 Saving the data (field)
     # ––––––––––- ––––––––––––––––––––––––––––
-    if (Nprtcl > 0).any(): new_dir = savePath/f"time_{tt:.1f}"
+    if (Nprtcl > 0).any(): new_dir = savePath/f"time_{tt:.{tdec}f}"
     else: new_dir = savePath/f"last"
     try: new_dir.mkdir(parents=True,  exist_ok=True)
     except FileExistsError: pass
@@ -693,258 +656,6 @@ def evolve_and_save(t,  u,n):
 ## ––––––––––––––- Initializing ––––––––––––––––––––-
 
 
-"""Structure 
-If there exists a folder with the parameter names and has time folders in it. 
-Load the parameters from parameters.txt
-If the parameters match the current code parameters enter the last time folder.
-Finally load the data.
-If not start from scratch."""
-
-
-
-#! Modify the loading process!
-def initialize_fields(forcestart=forcestart):
-    if not forcestart:
-        ## ––––––––––––––––––––––––- Beginning from existing data ––––––––––––––––––––––––-
-        if rank ==0 : print("Found existing simulation! Using last saved data.")
-        """Loading the data from the last time  """    
-        
-        paths = sorted([x for x in pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}").iterdir() if "time_" in str(x)], key=os.path.getmtime)
-        if len(paths) >0 and not start_big_particle: 
-            tlast = [0]*len(stb_s)
-            for jj in range(len(stb_s)):
-                for path in paths[::-1]:
-                    if  f"{wg}_stb_{stb_s[jj]:.3f}_sts_{tps/tf:.3f}_init_{init_name[jj]}" in os.listdir(path): 
-                        tlast[jj] = max(tlast[jj], float(str(path).split("time_")[-1]))
-                        
-            
-            tlast = np.min(tlast) - dt_save #! Loading the second last
-            paths = [path for path in paths if str(tlast) in str(path)][0]
-            tinit = float(str(paths).split("time_")[-1])
-            
-        else: 
-            paths = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}/last")
-            tinit = 0.
-        if rank ==0 : print(f"tinit is {tinit}")
-        issts = [True for i in paths.iterdir() if "sts_" in str(i)]
-        loadn = True if len(issts) > 0 else False
-        # ––––––––––––––––––- specifying manually –––––––––––––––––––– #
-        # tinit = 20.0
-        # paths = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}/time_{tinit:.1f}")
-        # –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––– #
-        
-
-        if rank ==0 : print(f"Loading data from {paths}")
-        
-        uk[:],n[:] = load_npz(paths,uk, n,loadn = loadn)
-        
-        u[0] = irfft_mpi(uk[0], u[0])
-        u[1] = irfft_mpi(uk[1], u[1])
-        u[2] = irfft_mpi(uk[2], u[2])
-        return paths,tinit
-    
-    else:
-        ## –––––––––––––––––––––– Beginning from start ––––––––––––––––––––––––––––––––––
-
-        kinit = 31 # Wavenumber of maximum non-zero initial pressure mode.    
-        thu = np.random.uniform(0, TWO_PI,  k.shape)
-        thv = np.random.uniform(0, TWO_PI,  k.shape)
-        thw = np.random.uniform(0, TWO_PI,  k.shape)
-
-        # eprofile = 1/np.where(kint ==0, np.inf,kint**(2.0))/normalize
-        eprofile = kint**2*np.exp(-kint**2/2)/normalize
-        
-        
-        amp = (eprofile/np.where(kint == 0, np.inf, kint**2))**0.5
-        
-        uk[0] = amp*np.exp(1j*thu)*(kint**2<kinit**2)*(kint>0)*dealias
-        uk[1] = amp*np.exp(1j*thv)*(kint**2<kinit**2)*(kint>0)*dealias
-        uk[2] = amp*np.exp(1j*thw)*(kint**2<kinit**2)*(kint>0)*dealias
-        
-        u[0] = irfft_mpi(uk[0], u[0])
-        u[1] = irfft_mpi(uk[1], u[1])
-        u[2] = irfft_mpi(uk[2], u[2])
-        
-        uk[0] = rfft_mpi(u[0],uk[0])
-        uk[1] = rfft_mpi(u[1],uk[1])
-        uk[2] = rfft_mpi(u[2],uk[2])
-        
-        trm = (kx*uk[0]  + ky*uk[1] + kz*uk[2])
-        uk[0] = uk[0] + invlap*kx*trm
-        uk[1] = uk[1] + invlap*ky*trm
-        uk[2] = uk[2] + invlap*kz*trm
-        
-        ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
-        ek_arr0 = comm.allreduce(e3d_to_e1d(ek),op = MPI.SUM) #! This is the shell-summed ek a
-        # if rank ==0: print(ek_arr0, np.sum(ek_arr0))
-        e0 = np.sum(ek_arr0)
-        uk[0] = uk[0] *(einit/e0)**0.5
-        uk[1] = uk[1] *(einit/e0)**0.5
-        uk[2] = uk[2] *(einit/e0)**0.5
-        
-        
-        u[0] = irfft_mpi(uk[0], u[0])
-        u[1] = irfft_mpi(uk[1], u[1])
-        u[2] = irfft_mpi(uk[2], u[2])
-        
-        tinit = 0.
-        n[:] = 1.0
-        
-        if rank == 0: print(f"Velocity and number density fields are set!")
-        return None,0
-    
-
-
-
-
-
-
-
-def initialize_particles(stbs, uk = uk,n = n,start_big_particle = start_big_particle,paths = None):
-    if start_big_particle:
-        if rank ==0 : print("Starting big particles from scratch")
-        # ––––––––––––––––––- calculating Q ––––––––––––––––––- #
-        u[0] = irfft_mpi(uk[0]*phase_k*dealias, u[0])
-        u[1] = irfft_mpi(uk[1]*phase_k*dealias, u[1])
-        u[2] = irfft_mpi(uk[2]*phase_k*dealias, u[2])
-        
-        rhsu[:] = u[0]*diff_x(u[0],vtemp[0]) + u[1]*diff_y(u[0],vtemp[1]) + u[2]*diff_z(u[0],vtemp[2])
-        rhsv[:] = u[0]*diff_x(u[1],vtemp[0]) + u[1]*diff_y(u[1],vtemp[1]) + u[2]*diff_z(u[1],vtemp[2])
-        rhsw[:] = u[0]*diff_x(u[2],vtemp[0]) + u[1]*diff_y(u[2],vtemp[1]) + u[2]*diff_z(u[2],vtemp[2])
-        
-        Qk = -0.5* (1j*kx*rfft_mpi(rhsu, pk) + 1j*ky*rfft_mpi(rhsv, pk) +1j*kz* rfft_mpi(rhsw, pk) )*conjphase_k*dealias*0.5
-        #? The first 0.5 is coming from the formula. The last one due to phase shift.
-        
-        u[0] = irfft_mpi(uk[0]*dealias, u[0])
-        u[1] = irfft_mpi(uk[1]*dealias, u[1])
-        u[2] = irfft_mpi(uk[2]*dealias, u[2])
-        
-        rhsu[:] = u[0]*diff_x(u[0],vtemp[0]) + u[1]*diff_y(u[0],vtemp[1]) + u[2]*diff_z(u[0],vtemp[2])
-        rhsv[:] = u[0]*diff_x(u[1],vtemp[0]) + u[1]*diff_y(u[1],vtemp[1]) + u[2]*diff_z(u[1],vtemp[2])
-        rhsw[:] = u[0]*diff_x(u[2],vtemp[0]) + u[1]*diff_y(u[2],vtemp[1]) + u[2]*diff_z(u[2],vtemp[2])
-        
-        Qk += -0.5* (1j*kx*rfft_mpi(rhsu, pk) + 1j*ky*rfft_mpi(rhsv, pk) +1j*kz* rfft_mpi(rhsw, pk) )*dealias*0.5
-
-        Q = irfft_mpi(Qk, ntemp)
-        # –––––––––––––––––––––––––––––––––––––-–––––––––––––––– #
-        
-        # ––––––––––––––––––- creating Q masks ––––––––––––––––––- #
-        
-        
-        
-        Qmax = comm.allreduce(np.max(Q),op = MPI.MAX)
-        Qmin = comm.allreduce(np.min(Q),op = MPI.MIN)
-        Qpos = Q>0
-        Qneg = Q<0
-        Qpostot = comm.allreduce(Qpos.sum(),op  = MPI.SUM)
-        Qnegtot = comm.allreduce(Qneg.sum(),op  = MPI.SUM)
-        
-        def calc_maxmin10_percentile(Q, Qmin, Qmax, frac=0.1, nbins=20000):
-            edges = np.linspace(Qmin, Qmax, nbins + 1)
-
-            local_hist, _ = np.histogram(Q, bins=edges)
-            hist = comm.allreduce(local_hist, op=MPI.SUM)
-            total = comm.allreduce(np.sum(Q>= Qmin),op = MPI.SUM)
-
-            cdf = np.cumsum(hist) / total
-            mask = np.concatenate(([True], np.diff(cdf) > 0)) #* useful code to only take monotonically increasing function.
-            fit = PchipInterpolator(cdf[mask],edges[1:][mask])
-
-            return fit(frac), fit(1-frac)
-
-        Qlow10,Qhigh10  = calc_maxmin10_percentile(Q,Qmin,Qmax)
-
-        
-        countup10 = comm.allreduce(np.sum(Q>=Qhigh10),op = MPI.SUM)
-        countlow10 = comm.allreduce(np.sum(Q<Qlow10),op = MPI.SUM)
-        if (countup10 <  Nprtcl).any() :   raise SystemExit(f"Need more percentile!")
-            
-        
-        Qpos10 = Q>=Qhigh10
-        Qneg10 = Q< Qlow10
-        
-        mask = (Qpos,Qneg,Qpos10,Qneg10)
-
-        # –––––––––––––––––––––––––––––––––––––––––––––––––––––––– #
-        
-        
-        for jj in range(len(stb_s[:uniquestbs])):
-            for i in range(1,5):
-                stb = stbs[jj + i*uniquestbs]
-                ind1, ind2,ind3 = np.where(mask[i-1]) #! -1  to ensure the first index is 0. 
-                masktot = comm.allreduce(mask[i-1].sum(),op = MPI.SUM)
-                
-                nprtcl_to_choose = int((mask[i-1].sum()/masktot) * (Nprtcl[jj + i*uniquestbs])) #! The number of particles to choose in the given rank. 
-                tot_nprtcl_chosen = comm.allreduce(nprtcl_to_choose,op = MPI.SUM)
-                remainder =  Nprtcl[jj + i*uniquestbs] - tot_nprtcl_chosen
-                maskarray = comm.allgather(mask[i-1].sum())
-                
-                ranksorted = np.arange(num_process)[np.argsort(maskarray)[::-1]]
-                if rank in ranksorted[:remainder]: nprtcl_to_choose += 1
-                 
-                offset = comm.scan(nprtcl_to_choose, op=MPI.SUM) -  nprtcl_to_choose 
-                    
-                stb.coord = np.zeros((int(nprtcl_to_choose),stb.coord.shape[-1]))
-                if nprtcl_to_choose >0:
-                    stb.coord[:,0] = np.random.choice(X[ind1.ravel()],size = nprtcl_to_choose,replace = False) 
-                    stb.coord[:,1] = np.random.choice(Y[ind2.ravel()],size = nprtcl_to_choose,replace = False) 
-                    stb.coord[:,2] = np.random.choice(Z[ind3.ravel()],size = nprtcl_to_choose,replace = False) 
-                    stb.prtclid = offset +  np.arange(nprtcl_to_choose).reshape(-1,1)
-        
-        for  jj in range(len(stb_s)):
-            stb = stbs[jj]
-            stb.interpmat = np.zeros((stb.coord.shape[0], stb.interpmat.shape[1]))
-            stb.interpmat = stb.interp_cosine(stb.coord,np.concatenate((u,u,n[jj,None,...]), axis = 0))
-            stb.exterpmat = np.zeros((stb.prtclid.shape[0], 1))
-            stb.coord[:,d:2*d] = stb.interpmat[:,:d]
-            stb.coord[:,-1] = stb_s[jj]**1.5*stb.factor
-            stb.update_intrinsic()
-        
-        
-    
-    
-    else: 
-        
-        if paths == None: 
-            raise SystemExit("Please provide particle data path or start afresh")
-        
-        else: 
-            if stbs is not None:
-                rstart = X[sx][0]
-                rend = X[sx][-1] + dx 
-                cond = lambda x: (x[:,0]>=rstart)*(x[:,0]<rend)
-                #* the rank contains particles in [rstart,rend)
-                load_num_slabs = len([x for x in (paths).iterdir() if "Fields" in str(x) and ".npz" in str(x)])
-                data_rank_start = int(np.floor(rstart/(L)*load_num_slabs))
-                data_rank_end = int(np.ceil(rend/(L)*load_num_slabs))
-                for jj in range(len(stb_s)):
-                    stb = stbs[jj]
-                    if Nprtcl[jj] > 0:
-                        dir_b = paths / f"{wg}_stb_{stb_s[jj]:.3f}_sts_{tps/tf:.3f}_init_{init_name[jj]}"
-                        parts = []
-                        pids  = []
-                        for r in range(data_rank_start, data_rank_end):
-                            p = np.load(dir_b / f"state_{r}.npz")
-                            mask = cond(p["pos"])
-                            if mask.shape[0] > 0:
-                                coord = np.concatenate([p["pos"][mask], p["vel"][mask], p["mass"][mask, None]], axis=1)
-                                parts.append(coord)
-                                pids.append(p["prtclid"][mask])
-                            
-                        if len(parts)>0:
-                            stb.coord   = np.concatenate(parts, axis=0)
-                            stb.prtclid = np.concatenate(pids,  axis=0)
-                        else: 
-                            stb.coord = np.zeros((0,2*d + 1))
-                            stb.prtclid = np.zeros((0,1))
-                        stb.interpmat = np.zeros((stb.coord.shape[0], stb.interpmat.shape[1]))
-                        stb.exterpmat = np.zeros((stb.prtclid.shape[0], 1))
-                        stb.update_intrinsic()
-
-        
-    comm.Barrier()
-    if rank ==0: print("Data loaded successfully")
-    # raise SystemExit
 
 stbs = []
 for i,stb in enumerate(stb_s):
@@ -954,8 +665,19 @@ for i,stb in enumerate(stb_s):
     stbs[i].to_interp(2*d+1) # u, v_s and c_s
     stbs[i].to_exterp(1)
 
-path, tinit = initialize_fields(forcestart)
-initialize_particles(stbs,uk,n,start_big_particle,path)
+ic = InitialConditions(comm, N, L, d, loadPath, u, uk, n,
+                       kx, ky, kz, k, kint, dealias, invlap, normalize, einit,
+                       rfft_mpi, irfft_mpi, e3d_to_e1d,
+                       wg, tps, tf, dt_save,
+                       mode = "all_stokes", clip = clip_zero, load_dealias = False,
+                       start_big_particle = start_big_particle,
+                       phase_k = phase_k, conjphase_k = conjphase_k,
+                       diff_x = diff_x, diff_y = diff_y, diff_z = diff_z,
+                       fresh_particles = "qcriterion", stb_s = stb_s, init_name = init_name,
+                       uniquestbs = uniquestbs, Nprtcl = Nprtcl)
+
+paths, tinit = ic.initialize_fields(forcestart)
+ic.initialize_particles(stbs, paths)
 
 
 ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array

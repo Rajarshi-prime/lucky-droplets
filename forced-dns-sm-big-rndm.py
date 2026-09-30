@@ -7,6 +7,7 @@ from mpi4py import MPI
 from time import time
 import pathlib,os,sys,h5py
 from particles import MPI_particles
+from initial_conditions import InitialConditions
 curr_path = pathlib.Path(__file__).parent
 forcestart = False
 if int(sys.argv[-1]) ==0 :
@@ -35,6 +36,7 @@ dtmax = 5*0.256/N
 dtmin = 0.2*0.256/N
 T = 20
 dt_save = 0.1
+tdec = max(0, int(np.ceil(-np.log10(dt_save)))) #! decimals in the time_ folder names
 st = round(dt_save/dt) #!Savestep : Confusing
 sts = 0.001
 stb_s = [0.017,0.017/4, 0.017*4,0.017*6.35]
@@ -135,8 +137,8 @@ param["interval of saving indices"] = st
 
 # savePath = pathlib.Path(f"/home/rajarshi.chattopadhyay/python/3D-DNS/data/samriddhi-tests-euler-spherical-dealias-final/N_{N}")
 re = 1/nu if nu !=0 else "inf"
-loadPath = pathlib.Path(f"./data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}")
 savePath = pathlib.Path(f"./data_cosine/forced_{isforcing}/stochastic/highhighn/N_{N}_Re_{re:.1f}")
+loadPath = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}") #! Where the restart data is read from. Point this at savePath's tree to restart this run's own output.
 
 if rank == 0:
     print(savePath)
@@ -461,35 +463,6 @@ def load_trunc(x):
     x1[...,cond_ky,:x.shape[-1]] = x.copy()
     return irfftn(x1,(N,N), axes = (-2,-1))
     
-def load_npz(paths,uk,tps = tps, tf = tf): #! Rewrite
-    load_num_slabs = len([x for x in (paths).iterdir() if "Fields" in str(x) and ".npz" in str(x)])
-    data_per_rank = N//load_num_slabs
-    rank_data = range(rank*Np,(rank + 1)*Np) # The rank contains these slices 
-    slab_old = np.inf
-    for lidx,j in enumerate(rank_data):
-        slab = j//data_per_rank
-        idx = j%data_per_rank
-        
-        # print(f"Rank {rank} is loading slab {slab} and idx {idx}")
-        
-        """Loading the truncated data"""
-        if slab_old != slab:  
-            Field = np.load(paths/f"Fields_k_{slab}.npz")
-        slab_old = slab
-        uk[0,:,lidx] = Field['uk'][:,idx]
-        uk[1,:,lidx] = Field['vk'][:,idx]
-        uk[2,:,lidx] = Field['wk'][:,idx]
-
-
-        """Loading the OG data"""
-        # if slab_old != slab:  Field = np.load(paths/f"Fields_{slab}.npz")
-        # slab_old = slab
-        # u[0,lidx] = Field['u'][idx]
-        # u[1,lidx] = Field['v'][idx]
-        # u[2,lidx] = Field['w'][idx]  
-    return uk
-    
-    
 def load_hdf5(paths, u, n,tps =tps, tf = tf):
     with h5py.File(paths/'Fields.hdf5','r+', driver = 'mpio', comm = comm) as f:
         u[0] = f['u'][sx,...][:]
@@ -521,7 +494,7 @@ def save(i,tt,uk,stbs,tf = tf, tps = tps):
     # ----------- ----------------------------
     #                 Saving the data (field)
     # ----------- ----------------------------
-    if (Nprtcl > 0).any(): new_dir = savePath/f"time_{tt:.1f}"
+    if (Nprtcl > 0).any(): new_dir = savePath/f"time_{tt:.{tdec}f}"
     else: new_dir = savePath/f"last"
     try: new_dir.mkdir(parents=True,  exist_ok=True)
     except FileExistsError: pass
@@ -663,120 +636,16 @@ def evolve_and_save(t,  u):
 ## --------------- Initializing ---------------------
 
 
-"""Structure 
-If there exists a folder with the parameter names and has time folders in it. 
-Load the parameters from parameters.txt
-If the parameters match the current code parameters enter the last time folder.
-Finally load the data.
-If not start from scratch."""
+ic = InitialConditions(comm, N, L, d, loadPath, u, uk, None,
+                       kx, ky, kz, k, kint, dealias, invlap, normalize, einit,
+                       rfft_mpi, irfft_mpi, e3d_to_e1d,
+                       wg, tps, tf, dt_save,
+                       mode = "all_stokes", start_big_particle = start_big_particle,
+                       fresh_particles = "velocity", stb_s = stb_s, Nprtcl = Nprtcl) #! no density field, and no init name in the folders
 
+paths, tinit = ic.initialize_fields(forcestart)
+if not forcestart: ic.initialize_particles(stbs, paths) #! a fresh start leaves the particles where MPI_particles put them
 
-
-#! Modify the loading process!
-
-if not forcestart:
-    ## ------------------------- Beginning from existing data -------------------------
-    if rank ==0 : print("Found existing simulation! Using last saved data.")
-    """Loading the data from the last time  """    
-    
-    paths = sorted([x for x in pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}").iterdir() if "time_" in str(x)], key=os.path.getmtime)
-    if len(paths) >0 and not start_big_particle: 
-        # paths = paths[-2]
-        paths = paths[0]
-        tinit = float(str(paths).split("time_")[-1])
-        
-    else: 
-        paths = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}/last")
-        tinit = 0.
-    issts = [True for i in paths.iterdir() if "sts_" in str(i)]
-    loadn = True if len(issts) > 0 else False
-    # ------------------- specifying manually ------------------- #
-    # tinit = 20.0
-    # paths = pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_{isforcing}/N_{N}_Re_{re:.1f}/time_{tinit:.1f}")
-    # ------------------------------------------------------------ #
-    
-
-    if rank ==0 : print(f"Loading data from {paths}")
-    
-    uk[:] = load_npz(paths,uk)
-    
-    # u,n = load_hdf5(paths,u,n)
-    u[0] = irfft_mpi(uk[0]*dealias, u[0])
-    u[1] = irfft_mpi(uk[1]*dealias, u[1])
-    u[2] = irfft_mpi(uk[2]*dealias, u[2])
-    if not start_big_particle: #! Change this to different ranks.
-        for jj in range(len(stbs)):
-            stb = stbs[jj]
-            stb0 = stb_s[jj]
-            prtcl_data = np.load(paths/f"{wg}_stb_{stb0:.3f}_sts_{tps/tf:.3f}/state_{rank}.npz")
-            stb.coord = np.zeros((prtcl_data["pos"].shape[0], stb.coord.shape[1]))
-            stb.interpmat = np.zeros((stb.coord.shape[0], stb.interpmat.shape[1]))
-            stb.coord[:,:d] = prtcl_data["pos"]
-            stb.coord[:,d:2*d] = prtcl_data["vel"]
-            stb.coord[:,-1] = prtcl_data["mass"]
-            stb.prtclid = prtcl_data["prtclid"]
-            stb.interpmat[:,:d] = prtcl_data["umat"]
-            stb.exterpmat = np.zeros((stb.prtclid.shape[0], 1))
-    
-    else: 
-        for jj in range(len(stbs)):
-            stb = stbs[jj]
-            stb0 = stb_s[jj]
-            stb.interpmat = stb.interp_cosine(stb.coord,np.concatenate((u,u[0][None,:]),axis = 0))
-            stb.coord[:,d:2*d] = stb.interpmat[:,:d]
-        
-    del paths
-    comm.Barrier()
-    if rank ==0: print("Data loaded successfully")
-    
-    
-
-if forcestart:
-    ## ---------------------- Beginning from start ----------------------------------
-
-    kinit = 31 # Wavenumber of maximum non-zero initial pressure mode.    
-    thu = np.random.uniform(0, TWO_PI,  k.shape)
-    thv = np.random.uniform(0, TWO_PI,  k.shape)
-    thw = np.random.uniform(0, TWO_PI,  k.shape)
-
-    # eprofile = 1/np.where(kint ==0, np.inf,kint**(2.0))/normalize
-    eprofile = kint**2*np.exp(-kint**2/2)/normalize
-    
-    
-    amp = (eprofile/np.where(kint == 0, np.inf, kint**2))**0.5
-    
-    uk[0] = amp*np.exp(1j*thu)*(kint**2<kinit**2)*(kint>0)*dealias
-    uk[1] = amp*np.exp(1j*thv)*(kint**2<kinit**2)*(kint>0)*dealias
-    uk[2] = amp*np.exp(1j*thw)*(kint**2<kinit**2)*(kint>0)*dealias
-    
-    u[0] = irfft_mpi(uk[0], u[0])
-    u[1] = irfft_mpi(uk[1], u[1])
-    u[2] = irfft_mpi(uk[2], u[2])
-    
-    uk[0] = rfft_mpi(u[0],uk[0])
-    uk[1] = rfft_mpi(u[1],uk[1])
-    uk[2] = rfft_mpi(u[2],uk[2])
-    
-    trm = (kx*uk[0]  + ky*uk[1] + kz*uk[2])
-    uk[0] = uk[0] + invlap*kx*trm
-    uk[1] = uk[1] + invlap*ky*trm
-    uk[2] = uk[2] + invlap*kz*trm
-    
-    ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
-    ek_arr0 = comm.allreduce(e3d_to_e1d(ek),op = MPI.SUM) #! This is the shell-summed ek a
-    # if rank ==0: print(ek_arr0, np.sum(ek_arr0))
-    e0 = np.sum(ek_arr0)
-    uk[0] = uk[0] *(einit/e0)**0.5
-    uk[1] = uk[1] *(einit/e0)**0.5
-    uk[2] = uk[2] *(einit/e0)**0.5
-    
-    
-    u[0] = irfft_mpi(uk[0], u[0])
-    u[1] = irfft_mpi(uk[1], u[1])
-    u[2] = irfft_mpi(uk[2], u[2])
-    
-    tinit = 0.
-    
 
 
 ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
