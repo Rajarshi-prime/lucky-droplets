@@ -8,12 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Do NOT LOOK at git history.
 - Before answering, reread your response and replace any word a physics graduate student outside computer science might not know.
 - Before editing, find the relevant code and identify the smallest change needed. Implement only that change. After editing, review the diff and remove anything that is not necessary.
+- Make and agent called 'distiller' and store in /claude. 'distiller' reviews the diff at the end of every prompt response, and suggests edits that simplifies the changes according to the python style given below. Implement those changes.
 
 # Python style
 
 - Write the simplest correct implementation appropriate for this existing codebase.
 - Match the style of existing files. Read them before writing code.
-- Write in the same style as `forced-dns-sm.py`.
+- Ask for a file name, read the file and then write code in the same style as that file.
 - Make the smallest diff that solves the task. Do not touch unrelated code.
 - Do not refactor unrelated code, if you notice something that could be improved, suggest that in bullet points rather than modifying.
 - Prefer modifying existing functions over creating new ones.
@@ -33,7 +34,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # Words to avoid in code and responses
 
-- wire, mid-migration, live, simply
+- wire, mid-migration, live, simply, just, 
+
 
 ## What this is
 

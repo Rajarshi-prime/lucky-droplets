@@ -104,16 +104,16 @@ class InitialConditions:
 
             if n is None: continue
             if subdirs is None:
-                if n.ndim == 4: n[:,lidx] = self.ndefault
+                if n.ndim >1: n[:,lidx] = self.ndefault
                 else: n[lidx] = self.ndefault
-            elif len(subdirs) == 1 and n.ndim == 4: #! one saved field shared by every Stokes number
+            elif len(subdirs) == 1 and n.ndim >1: #! one saved field shared by every Stokes number
                 row = nFields[subdirs[0]][idx]
                 n[:,lidx] = self.ntransform(row) if self.ntransform is not None else row
             else:
                 for ii, sub in enumerate(subdirs):
                     row = nFields[sub][idx]
                     if self.ntransform is not None: row = self.ntransform(row)
-                    if n.ndim == 4: n[ii,lidx] = row
+                    if n.ndim >1: n[ii,lidx] = row
                     else: n[lidx] = row
         return uk, n
 
@@ -164,7 +164,7 @@ class InitialConditions:
     def apply_clip(self):
         """Puts the loaded or freshly built density on the same footing the evolution keeps it."""
         if self.clip is None or self.n is None: return
-        if self.n.ndim == 4:
+        if self.n.ndim >1:
             for ii in range(self.n.shape[0]): self.n[ii] = self.clip(self.n[ii]) #! the mean is a global sum, so one Stokes number at a time
         else:
             self.n[:] = self.clip(self.n)

@@ -1,0 +1,220 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, shadows}
+
+\tikzset{
+  startstop/.style={ellipse, draw=teal!70!black, thick, fill=teal!15,
+    minimum width=2.4cm, minimum height=0.9cm, align=center,
+    font=\small\bfseries, drop shadow},
+  process/.style={rectangle, rounded corners=3pt, draw=blue!50!black, thick,
+    fill=blue!6, text width=6.6cm, minimum height=1.05cm, align=center,
+    font=\small, inner sep=6pt, drop shadow},
+  io/.style={trapezium, trapezium left angle=68, trapezium right angle=112,
+    draw=orange!70!black, thick, fill=orange!10, text width=6.6cm,
+    minimum height=1.0cm, align=center, font=\small, inner sep=6pt, drop shadow},
+  arrowstyle/.style={-{Latex[length=2.3mm]}, thick, gray!55!black},
+}
+
+% #1 init text, #2 save text, #3 rk4 text, #4 clip/adjust text, #5 end text
+\newcommand{\DnsFlow}[5]{%
+\begin{center}
+\begin{tikzpicture}[node distance=6mm and 6mm]
+  \node[startstop] (start) {Start};
+  \node[process, below=of start] (init) {#1};
+  \node[io, below=of init] (save) {#2};
+  \node[process, below=of save] (rk4) {#3};
+  \node[process, below=of rk4] (clip) {#4};
+  \node[process, below=of clip] (enforce) {Restore the divergence-free condition on $u$};
+  \node[startstop, below=of enforce] (endnode) {#5};
+  \draw[arrowstyle] (start) -- (init);
+  \draw[arrowstyle] (init) -- (save);
+  \draw[arrowstyle] (save) -- (rk4);
+  \draw[arrowstyle] (rk4) -- (clip);
+  \draw[arrowstyle] (clip) -- (enforce);
+  \draw[arrowstyle] (enforce) -- (endnode);
+  \draw[arrowstyle] (enforce.east) -- ++(1.5,0) |- (save.east)
+    node[pos=0.27, right, font=\scriptsize, align=left, text=gray!50!black]
+    {repeat until\\[-2pt]$t \ge T$};
+\end{tikzpicture}
+\end{center}
+}
+
+\title{File Types in the Turbulence--Droplet DNS Code}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Overview}
+This code simulates forced, statistically homogeneous, isotropic
+turbulence with a Fourier (pseudo-spectral) method, one-way coupled
+to particles that mimic cloud droplets. The velocity field is evolved
+in Fourier space; particles are represented either as a continuum
+number-density field advected on the ``slow manifold'' (small Stokes
+number, i.e.\ particles that closely follow the fluid) or as explicit
+tracked particles (finite Stokes number, referred to as ``big''
+particles). The code runs in parallel across many processors using
+MPI, with the simulation domain sliced into 1-D slabs along $x$.
+
+\section{Main simulation scripts (\texttt{forced-dns-*.py})}
+These are five independent, largely duplicated top-level scripts,
+not a shared library with switches. Each hardcodes its own grid
+size, time step, save path, and physics; each is a program you run
+directly with \texttt{mpirun}, not a module you import.
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{\texttt{forced-dns-sm.py}} --- the baseline: forced
+    Navier--Stokes turbulence plus the slow-manifold number-density
+    field \texttt{n}, with no explicit particles. This is the file
+    whose style the others imitate.
+  \item \textbf{\texttt{forced-dns-sm-clip-new.py}} --- identical to
+    the baseline except that the crude step of clipping negative
+    \texttt{n} to zero and rescaling is replaced by a root-finding
+    procedure (\texttt{clip\_zero}) that clips to an exact target
+    mean.
+  \item \textbf{\texttt{forced-dns-log-sm.py}} --- evolves
+    $\log(n)$ instead of \texttt{n} directly, which avoids needing
+    to clip for positivity at all (a logarithm is automatically
+    positive when exponentiated). Uses a different time step,
+    save interval, and forcing amplitude, and its evolution equation
+    carries different terms.
+  \item \textbf{\texttt{forced-dns-sm-big.py}} --- adds explicit
+    tracked (``big'') particles for several Stokes numbers and
+    initial conditions simultaneously, in addition to the
+    slow-manifold field. This is the only variant that places new
+    particles using the $Q$-criterion (a way of seeding particles in
+    regions of strong flow rotation).
+  \item \textbf{\texttt{forced-dns-sm-big-rndm.py}} --- a big-particle
+    variant with added random forcing on the particles themselves.
+    It carries no density field at all.
+\end{itemize}
+
+Each script follows the same internal layout: parameter block and
+grid/Fourier-transform setup, a forcing routine, a clipping routine,
+the spectral right-hand side of the evolution equations, a
+fourth-order Runge--Kutta time-stepper, a checkpoint-saving routine,
+and a main time-stepping loop, followed by construction of the
+initial conditions and the call that runs the simulation.
+
+\subsection{Control flow of each variant}
+All five scripts share the same outer skeleton: build or load the
+starting state, then repeatedly take a Runge--Kutta step, fix up the
+result, and save on a schedule, until the end time is reached. The
+flowcharts below highlight exactly where each variant departs from
+that skeleton.
+
+\paragraph{\texttt{forced-dns-sm.py}}
+\DnsFlow{Load a restart, or build a fresh field ($u$, $n$)}%
+{Every \texttt{st} steps: save $u$, $n$, and the energy/flux spectra}%
+{RK4 step: forced Navier--Stokes for $u$; advect $n$ with the flow,
+corrected for the particles' inertia}%
+{Clip negative $n$ to zero, rescale so its mean is unchanged
+(\texttt{clip\_zero})}%
+{$t \ge T$: save the final state and stop}
+
+\paragraph{\texttt{forced-dns-sm-clip-new.py}}
+\DnsFlow{Load a restart, or build a fresh field ($u$, $n$)}%
+{Every \texttt{st} steps: save $u$, $n$, and the energy/flux spectra}%
+{RK4 step: forced Navier--Stokes for $u$; advect $n$ with the flow,
+corrected for the particles' inertia}%
+{Root-find a clip of $n$ that hits a target mean exactly
+(\texttt{clip\_zero})}%
+{$t \ge T$: save the final state and stop}
+
+\paragraph{\texttt{forced-dns-log-sm.py}}
+\DnsFlow{Load a restart, or build a fresh field ($u$, $\log n$)}%
+{Every \texttt{st} steps: save $u$, $\log n$, and the energy/flux spectra}%
+{RK4 step: forced Navier--Stokes for $u$; advance $\log n$ using the
+flow's velocity gradient and its divergence}%
+{Clamp $\log n$ between a floor and a ceiling, rescale so the mean
+of $n$ stays 1 (\texttt{clip\_error})}%
+{$t \ge T$: save the final state and stop}
+
+\paragraph{\texttt{forced-dns-sm-big.py}}
+\DnsFlow{Load a restart, or place fresh particles by the $Q$-criterion,
+for each Stokes number, alongside the field ($u$, $n$)}%
+{Near each save time: write $u$, $n$, and every Stokes number's
+particle state}%
+{RK4 step: forced Navier--Stokes for $u$; for each Stokes number,
+advect $n$ \emph{and} push its particles (interpolate the flow onto
+them, integrate their motion)}%
+{Clip negative $n$ to zero per Stokes number; shrink the time step to
+resolve the fastest particle}%
+{$t \ge T$: save the final state and stop}
+
+\paragraph{\texttt{forced-dns-sm-big-rndm.py}}
+\DnsFlow{Load a restart, or place fresh particles from the local flow
+velocity, for each Stokes number (no density field)}%
+{Near each save time: write $u$ and every Stokes number's particle
+state}%
+{RK4 step: forced Navier--Stokes for $u$; for each Stokes number,
+push particles with the inertial particle equation}%
+{Add one random velocity kick to every particle}%
+{$t \ge T$: save the final state and stop}
+
+\section{Shared support modules}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{\texttt{initial\_conditions.py}} --- shared startup
+    logic used by all five scripts. It either loads a previously
+    saved state (a restart) or builds a fresh one, and is
+    parameterized (via constructor arguments) to handle every
+    difference between the five scripts' restart conventions:
+    which checkpoint folder to use, how to clip the density, whether
+    the field on disk is \texttt{n} or $\log n$, how particles are
+    seeded from scratch, and so on.
+  \item \textbf{\texttt{particles.py}} --- the tracked-particle
+    engine (class \texttt{MPI\_particles}). Holds each particle's
+    position, velocity, and mass; interpolates the fluid velocity
+    onto particle positions and deposits particle quantities back
+    onto the grid; exchanges particles between processors when they
+    cross slab boundaries; and computes the particle equations of
+    motion, including the random-forcing option. A few core
+    interpolation routines are compiled just-in-time for speed and
+    must stay compatible with that compiler's restrictions.
+  \item \textbf{\texttt{restart.py}} --- an earlier, now-superseded
+    version of the restart logic. No script imports it, so it has no
+    effect on any run; it is kept only as a leftover.
+\end{itemize}
+
+\section{Analysis and plotting scripts}
+\texttt{plot.py}, \texttt{plot-correlation.py}, and the dated
+\texttt{plot-YYYYMMDD.py} files are standalone, notebook-style
+scripts (organized in cells) that read simulation output and produce
+figures. They are not imported by any other file and are treated as
+disposable: a new plotting need is normally addressed by adding a
+new dated file rather than editing an old one.
+
+\section{Data}
+\texttt{data\_cosine/} holds a small local sample of simulation
+output, organized by forcing flag, grid resolution, and Reynolds
+number, then by save time. Each save-time folder contains
+Fourier-space velocity field pieces (one file per processor slab),
+energy- and flux-spectrum diagnostics, and, per Stokes number,
+either number-density files or tracked-particle state files. This
+sample data is excluded from version control and is much smaller
+than the full dataset, which lives on the cluster where the
+simulations actually run.
+
+\texttt{comparing\_spectra.hdf5} is a single self-describing binary
+data file (HDF5 format) at the repository root, used for comparing
+energy spectra.
+
+\section{Repository metadata}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{\texttt{CLAUDE.md}} --- instructions and
+    architectural notes for the Claude assistant working in this
+    repository.
+  \item \textbf{\texttt{.gitignore}} --- lists paths excluded from
+    version control (the sample data folder, compiled-code caches,
+    and the ignore file itself).
+  \item \textbf{\texttt{.claude/}} --- assistant configuration,
+    including the agent that reviews each response's changes for
+    unnecessary complexity.
+\end{itemize}
+
+\end{document}
