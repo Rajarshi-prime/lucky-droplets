@@ -10,11 +10,15 @@ import pathlib,os,h5py
 from scipy.fft import fftfreq,rfftn, irfftn
 from scipy.interpolate import CubicSpline, splrep,splev,splder
 from scipy.optimize import newton,brentq
+from scipy.interpolate import PchipInterpolator
 # %%
 N =256
 num_process = 256
 Np = N//num_process
-datapath = lambda t,sts,stb,name: pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_256_Re_398.1/time_{t:.1f}/wo_g_sts_{sts:.3f}_stb_{stb:.3f}_init_{name}")
+dt_save = 0.5
+gravity = False
+wg = "with_g" if gravity else "wo_g"
+datapath = lambda t,sts,stb,name: pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_256_Re_398.1/time_{t:.1f}/{wg}_sts_{sts:.3f}_stb_{stb:.3f}_init_{name}")
 sts = 0.001
 stb_s = [0.017,0.017/4, 0.017*4,0.017*6.35]
 names = ['random','Qpos','Qneg','Qpos_high','Qneg_high']
@@ -60,15 +64,26 @@ normalize = np.where((kz== 0) + (kz == N//2) , 1/(N**6/Twith_PI**3),2/(N**6/Twit
 #%%
 # names = ["","highn/","highhighn/","synthetic/"]
 M0 = 7.2e-4
-prtcl_path = lambda t,stb,name = "random": pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_256_Re_398.1/time_{t:.1f}/wo_g_stb_{stb:.3f}_sts_0.001_init_{name}/")
-times = [float(i.split("_")[-1]) for i in os.listdir(prtcl_path(0,stb_s[0]).parent.parent) if "time_" in i]
-times.sort()
-times = np.array(times)
+prtcl_path = lambda t,stb,name = "random": pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_256_Re_398.1/time_{t:.1f}/{wg}_stb_{stb:.3f}_sts_0.001_init_{name}/")
+
+paths = sorted([prtcl_path(0,stb_s[0]).parent.parent/f"{i}" for i in os.listdir(prtcl_path(0,stb_s[0]).parent.parent) if "time_" in i], key = lambda x: float(str(x).split("time_")[-1]))
+#%%
+tlast = [0]*len(stb_s)
+for jj in range(len(stb_s)):
+    for path in paths[::-1]:
+
+        if len([i for i in os.listdir(path) if f"{wg}_stb_{stb_s[jj]:.3f}_sts_{sts}" in i]) != 0:
+
+            tlast[jj] = max(tlast[jj], float(str(path).split("time_")[-1]))
+tlast = np.min(tlast) #! the last
+
+
+times = np.arange(0,tlast + 0.5*dt_save, dt_save)
 # times = np.arange(times[0], times[-1] + 0.5, 1) #! Reducing data loading.
 Ntimes = len(times)
 prtcl_mass = np.zeros((Ntimes,Nprtcl[0]))
 prtcl_id = np.zeros((Ntimes,Nprtcl[0]))
-print(Ntimes)
+
 #%%
 def load_u(paths):
     if type(paths) == str: paths = pathlib.Path(paths)
@@ -95,56 +110,74 @@ def load_u(paths):
         uk[2,:,lidx] = Field['wk'][:,idx]
     return irfftn(uk, s = (N,N,N), axes = (-3,-2,-1))
 #%%
-u = load_u("/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_256_Re_1003.2/time_16.3")
+u = load_u("/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_256_Re_398.1/last")
+#%%
+0.5*(u**2).sum()*dx*dy*dz
 #%%
 urms = (2/3.*np.mean(u**2)/2)**0.5
 epsilon =  (nu0)**3 
 lmbd = (15*nu/epsilon)**0.5*urms
 re_lmbd = urms*lmbd/nu
 re_lmbd,urms, epsilon, nu
-#%%
-# # %%
-# for i,t in enumerate(times):
-#     prtcl_count = 0
-#     print(f"Time = {t:.1f}", end = "\r")
-#     for rank in range(num_process):
-#         data = np.load(prtcl_path(t,stb_s[0])/f"state_{rank}.npz")
-#         prtcl_id[i,prtcl_count: prtcl_count+data['prtclid'].shape[0] ] = data['prtclid'].ravel()
-        
-#         prtcl_mass[i,prtcl_count: prtcl_count+data['prtclid'].shape[0] ] = data['mass']
-#         prtcl_count += data['prtclid'].shape[0]
-        
-#     sortedidx = np.argsort(prtcl_id[i])
-#     prtcl_id[i] = prtcl_id[i,sortedidx]
-#     prtcl_mass[i] = prtcl_mass[i,sortedidx]
-    
 
-# #%%
-# # %%
-# tot_mass = prtcl_mass.sum(axis = 1)
-# std_mass = np.std(prtcl_mass/prtcl_mass[0],axis = 1)
-# #%%
-# #%%
-
-# # tot_mass[-1]
-# plt.plot(times, tot_mass/tot_mass[0],'.-')
-# plt.ylabel('m')
-# plt.xlabel('t')
-# plt.yscale('log',base = 8)
-# # %%
-# prtcl_count = np.random.randint(0,Nprtcl[0],100)
-# # plt.plot(times, prtcl_mass[:,prtcl_count]/prtcl_mass[0,prtcl_count],'-',alpha = 0.2,color = cols[0])
-# plt.fill_between(times,-std_mass+tot_mass/(tot_mass[0]) ,std_mass+tot_mass/(tot_mass[0]),color = cols[0],alpha = 0.3,lw = 0)
-
-# plt.plot(times, tot_mass/(tot_mass[0]),'-',color = cols[0])
-# plt.ylabel('m/m(0)')
-# plt.xlabel('t')
-# plt.xlim(times[0],times[-1])
-# plt.ylim(1,None)
-# # plt.yscale('log',base = 8)
-# # plt.xscale('log',base = 2)
 # %%
+def load_instant(stb, init,time):
+    prtcl_count = 0
+    path = prtcl_path(time,stb,init)
+    num_process = len([i for i in os.listdir(path) if "state_" in i])
+    print(f"St = {stb:.3f}, Time = {time:.1f}, name= {init},num_process= {num_process}",end = "\r")
+    mass = np.zeros(0)
+    id = np.zeros(0)
+    for rank in range(num_process):
+        data = np.load(prtcl_path(time,stb,init)/f"state_{rank}.npz")
+        id= np.concatenate((id,data['prtclid'].ravel()))
+        
+        mass = np.concatenate((mass,data['mass'].ravel()))
+        prtcl_count += data['prtclid'].shape[0]
+        
+    sortedidx = np.argsort(id)
+    id = id[sortedidx]
+    mass = mass[sortedidx]
+    return mass
+#%%
+_ = load_instant(0.004,"Qneg",15.5)
+#%%
 
+def mask_max_growers(stb,init,t = times,frac = 0.9):
+    initmass = load_instant(stb,init,t[0])
+    print(f"Standard deviation for initial mass is : {initmass.std()}")
+    finalmass = load_instant(stb,init,t[-1])
+    edges = np.linspace(finalmass.min(),finalmass.max(),1001)
+    hist = np.histogram(finalmass, bins=edges)[0]/len(finalmass)
+    
+    cdf = np.cumsum(hist)
+    mask = np.concatenate(([True],np.diff(cdf)>0))
+
+    
+    fit = PchipInterpolator(cdf[mask],edges[1:][mask])
+    
+    masshigh10 = fit(frac)
+    return finalmass>=masshigh10
+#%%
+mask_max_growers(0.004,"Qneg").sum()
+#%%
+def load_mass_series(stb,init,times,load_luckiest = False):
+    Ntimes = len(times)
+    prtcl_mass = np.zeros(Ntimes)
+    prtcl_mass_std = np.zeros(Ntimes)
+    if load_luckiest == True:
+        mask = mask_max_growers(stb,init,times = times, frac = 0.9)
+    for i in range(Ntimes):
+        
+        dat = load_instant(stb,init,times[i])
+        prtcl_mass[i] = dat[mask].mean() if load_luckiest else dat.mean()
+        prtcl_mass_std[i] = dat[mask].std() if load_luckiest else dat.std()
+    return prtcl_mass,prtcl_mass_std
+        
+#%%
+load_mass_series(0.004,"Qneg",times)
+#%%
+data = np.zeros(2,)
 # %%
 def load_and_plot(nami,ax,xs,ys,dets,down_lim,up_lim):
     
