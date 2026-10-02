@@ -6,7 +6,7 @@ Postprocessing the 10% of the luckiest lucky droplets.
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-import pathlib,os,h5py
+import pathlib,os,h5py,json
 from scipy.fft import fftfreq,rfftn, irfftn
 from scipy.interpolate import CubicSpline, splrep,splev,splder
 from scipy.optimize import newton,brentq
@@ -120,6 +120,7 @@ lmbd = (15*nu/epsilon)**0.5*urms
 re_lmbd = urms*lmbd/nu
 re_lmbd,urms, epsilon, nu
 
+
 # %%
 def load_instant(stb, init,time):
     prtcl_count = 0
@@ -166,7 +167,7 @@ def load_mass_series(stb,init,times,load_luckiest = False):
     prtcl_mass = np.zeros(Ntimes)
     prtcl_mass_std = np.zeros(Ntimes)
     if load_luckiest == True:
-        mask = mask_max_growers(stb,init,times = times, frac = 0.9)
+        mask = mask_max_growers(stb,init,t = times, frac = 0.9)
     for i in range(Ntimes):
         
         dat = load_instant(stb,init,times[i])
@@ -177,7 +178,17 @@ def load_mass_series(stb,init,times,load_luckiest = False):
 #%%
 load_mass_series(0.004,"Qneg",times)
 #%%
-data = np.zeros(2,)
+db = {}
+for stb in stb_s:
+    for init in names: 
+        for load_luckiest in [True, False]:
+            which = "top10" if load_luckiest else "all"
+            key = f"{wg}/{stb:.3f}/{init}/{which}"
+            m, s = load_mass_series(stb, init, times, load_luckiest=load_luckiest)
+            db[key] = {"t":times.tolist(),"mean":m.tolist(),"std":s.tolist()}
+with open(f"mass_data_{wg}.json", "w") as f:
+    json.dump(db, f)
+                
 # %%
 def load_and_plot(nami,ax,xs,ys,dets,down_lim,up_lim):
     
