@@ -16,7 +16,7 @@ N =256
 num_process = 256
 Np = N//num_process
 dt_save = 0.5
-gravity = False
+gravity = True
 wg = "with_g" if gravity else "wo_g"
 datapath = lambda t,sts,stb,name: pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_256_Re_398.1/time_{t:.1f}/{wg}_sts_{sts:.3f}_stb_{stb:.3f}_init_{name}")
 sts = 0.001
@@ -188,7 +188,8 @@ for stb in stb_s:
             db[key] = {"t":times.tolist(),"mean":m.tolist(),"std":s.tolist()}
 with open(f"mass_data_{wg}.json", "w") as f:
     json.dump(db, f)
-                
+
+raise SystemExit     
 # %%
 def load_and_plot(nami,ax,xs,ys,dets,down_lim,up_lim):
     
