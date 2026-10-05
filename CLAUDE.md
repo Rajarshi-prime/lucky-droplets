@@ -34,7 +34,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # Words to avoid in code and responses
 
-- wire, mid-migration, live, simply, just, 
+- wire, mid-migration, live, simply, just, engine, landed,
 
 
 ## What this is

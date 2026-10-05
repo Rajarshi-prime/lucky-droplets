@@ -72,7 +72,7 @@ def load_u(paths):
     load_num_slabs = len([x for x in (paths).iterdir() if "Fields" in str(x) and ".npz" in str(x)])
     data_per_rank = N//load_num_slabs
     rank = 0
-    rank_data = range(rank*Np,(rank + 1)*Np) # The rank contains these slices 
+    rank_data = range(0,N) # The rank contains these slices 
     slab_old = np.inf
     for lidx,j in enumerate(rank_data):
         slab = j//data_per_rank
