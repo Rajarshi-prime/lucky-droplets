@@ -1,7 +1,7 @@
 """
 Finding and loading a saved state, or building a fresh one, for the forced-dns-* scripts.
 
-Every script builds the grid, the spectral operators and the MPI fft helpers itself and
+Loading script builds the grid, the spectral operators and the MPI fft helpers itself and
 hands them to InitialConditions, which owns the two startup paths: restart from saved
 data, or start from scratch. The variants differ in where they look for the restart
 folder (mode), how they store the number density (ntransform, ndefault, clip) and how
