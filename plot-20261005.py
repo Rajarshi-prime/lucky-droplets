@@ -16,7 +16,7 @@ N =256
 num_process = 256
 Np = N//num_process
 dt_save = 0.5
-gravity = False
+gravity = True
 wg = "with_g" if gravity else "wo_g"
 datapath = lambda t,sts,stb,name: pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_256_Re_398.1/time_{t:.1f}/{wg}_sts_{sts:.3f}_stb_{stb:.3f}_init_{name}")
 sts = 0.001
@@ -129,27 +129,44 @@ def load_instant(stb, init,time):
     num_process = len([i for i in os.listdir(path) if "state_" in i])
     print(f"St = {stb:.3f}, Time = {time:.1f}, name= {init},num_process= {num_process}",end = "\r")
     mass = np.zeros(0)
+    urel = np.zeros(0)
+    mass_next = np.zeros(0)
     id = np.zeros(0)
+    id_next = np.zeros(0)
     for rank in range(num_process):
         data = np.load(prtcl_path(time,stb,init)/f"state_{rank}.npz")
-        id= np.concatenate((id,data['prtclid'].ravel()))
-        
+        try: 
+            data_next = np.load(prtcl_path(time + dt_save,stb,init)/f"state_{rank}.npz")
+        except FileNotFoundError:
+            data_next = np.load(prtcl_path(time,stb,init)/f"state_{rank}.npz")
+        id = np.concatenate((id,data['prtclid'].ravel()))
         mass = np.concatenate((mass,data['mass'].ravel()))
+        urel = np.concatenate((urel, np.linalg.norm(data['umat'] - data['vel'], axis = 1).ravel()))
         prtcl_count += data['prtclid'].shape[0]
+        
+        id_next= np.concatenate((id_next,data_next['prtclid'].ravel()))
+        mass_next = np.concatenate((mass_next,data_next['mass'].ravel()))
         
     sortedidx = np.argsort(id)
     id = id[sortedidx]
     mass = mass[sortedidx]
-    return mass
+    urel = urel[sortedidx]
+    
+    sortedidx_next = np.argsort(id_next)
+    id_next = id_next[sortedidx_next]
+    mass_next = mass_next[sortedidx_next]
+    dmass = mass_next - mass
+    
+    return mass,urel, dmass
 #%%
-all_init = [[load_instant(stb,name,0.0).sum() for stb in stb_s] for name in names]
+all_init = [[load_instant(stb,name,0.0)[0].sum() for stb in stb_s] for name in names]
 all_init
 #%%
 
 def mask_max_growers(stb,init,t = times,frac = 0.9):
-    initmass = load_instant(stb,init,t[0])
+    initmass = load_instant(stb,init,t[0])[0]
     print(f"Standard deviation for initial mass is : {initmass.std()}")
-    finalmass = load_instant(stb,init,t[-1])
+    finalmass = load_instant(stb,init,t[-1])[0]
     edges = np.linspace(finalmass.min(),finalmass.max(),1001)
     hist = np.histogram(finalmass, bins=edges)[0]/len(finalmass)
     
@@ -164,19 +181,32 @@ def mask_max_growers(stb,init,t = times,frac = 0.9):
 #%%
 mask_max_growers(0.004,"Qneg").sum()
 #%%
-def load_mass_series(stb,init,times,load_luckiest = False):
+dmass_bins = np.linspace(0,1e-3,1001)
+def load_mass_series(stb,init,times,load_luckiest = False,dmass_bins = dmass_bins):
     Ntimes = len(times)
     prtcl_mass = np.zeros(Ntimes)
     prtcl_mass_std = np.zeros(Ntimes)
+    dmass_vals = 0.5*(dmass_bins[1:] + dmass_bins[:-1])
+    dmass_pdf = np.zeros(len(dmass_bins)-1)
+    temp_pdf = np.zeros(len(dmass_bins)-1)
     if load_luckiest == True:
         mask = mask_max_growers(stb,init,t = times, frac = 0.9)
     for i in range(Ntimes):
         
-        dat = load_instant(stb,init,times[i])
+        dat,urel,dmass_temp = load_instant(stb,init,times[i])
         Nprtcl = len(dat)
-        prtcl_mass[i] = dat[mask].mean() if load_luckiest else dat.mean()
-        prtcl_mass_std[i] = dat[mask].std() if load_luckiest else dat.std()
-    return prtcl_mass,prtcl_mass_std,Nprtcl
+        if load_luckiest == True: 
+            dat = dat[mask]
+            dmass_temp = dmass_temp[mask]
+            urel = urel[mask]
+            
+        temp_pdf += np.histogram(dmass_temp.ravel(),bins = dmass_bins)[0]
+        dmass_pdf += np.histogram(dmass_temp.ravel(),bins = dmass_bins,weights = urel.ravel())[0]
+        prtcl_mass[i] = dat.mean()
+        prtcl_mass_std[i] = dat.std()
+    cond = temp_pdf>0
+    dmass_urel = dmass_pdf[cond]/temp_pdf[cond]
+    return prtcl_mass,prtcl_mass_std,Nprtcl,dmass_urel,dmass_vals[cond]
         
 #%%
 load_mass_series(0.004,"Qneg",times)
@@ -187,8 +217,8 @@ for stb in stb_s:
         for load_luckiest in [True, False]:
             which = "top10" if load_luckiest else "all"
             key = f"{wg}/{stb:.3f}/{init}/{which}"
-            m, s,nprtcl = load_mass_series(stb, init, times, load_luckiest=load_luckiest)
-            db[key] = {"t":times.tolist(),"mean":m.tolist(),"std":s.tolist(),"n":nprtcl}
+            m, s,nprtcl,dmass_urel,dmass_vals = load_mass_series(stb, init, times, load_luckiest=load_luckiest)
+            db[key] = {"t":times.tolist(),"mean":m.tolist(),"std":s.tolist(),"n":nprtcl,"grwth_pdf":dmass_urel.tolist(), "dmass_vals":dmass_vals.tolist()}
 with open(f"mass_data_{wg}.json", "w") as f:
     json.dump(db, f)
 
