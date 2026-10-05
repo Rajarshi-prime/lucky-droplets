@@ -212,6 +212,7 @@ def load_series(times,stb_s,names,qbins = qbins):
     mass_mean = np.zeros((len(stb_s),len(names),2,len(times))) #! all and top10
     mass_std = np.zeros((len(stb_s),len(names),2,len(times)))
     qmean = np.zeros((len(stb_s),len(names),2,len(times),len(qbins)))
+    nmean = np.zeros((len(stb_s),len(names),len(times))) #! the field mean, so it carries no all/top10 axis
     cnt = [np.zeros((len(stb_s),len(names),2,len(b)-1)) for b in qbins]
     tot = [np.zeros((len(stb_s),len(names),2,len(b)-1)) for b in qbins]
     fields = np.zeros((4,N,N,N))
@@ -223,6 +224,7 @@ def load_series(times,stb_s,names,qbins = qbins):
         for kk,stb in enumerate(stb_s):
             for nami,init in enumerate(names):
                 fields[3] = load_n(datapath(t,sts,stb,init))
+                nmean[kk,nami,i] = np.mean(fields[3])
                 mass,urel,dmass,pos = load_instant(stb,init,t)
                 q = interp_quantities(prtcls[kk],pos,fields,urel)
                 for w,mask in enumerate((slice(None), masks[kk][nami])):
@@ -240,15 +242,16 @@ def load_series(times,stb_s,names,qbins = qbins):
         cond = cnt[v][kk,nami,w]>0 #! drop the bins with no droplets in them
         prof[kk,nami,w,v] = tot[v][kk,nami,w][cond]/cnt[v][kk,nami,w][cond]
         vals[kk,nami,w,v] = qvals[v][cond]
-    return mass_mean, mass_std, qmean, prof, vals
+    return mass_mean, mass_std, qmean, nmean, prof, vals
 #%%
 db = {}
-mass_mean,mass_std,qmean,prof,vals = load_series(times,stb_s,names)
+mass_mean,mass_std,qmean,nmean,prof,vals = load_series(times,stb_s,names)
 for kk,stb in enumerate(stb_s):
     for nami,init in enumerate(names):
         for w,which in enumerate(["all","top10"]):
             key = f"{wg}/{stb:.3f}/{init}/{which}"
-            db[key] = {"t":times.tolist(),"mean":mass_mean[kk,nami,w].tolist(),"std":mass_std[kk,nami,w].tolist(),"n":int(Nprtcl[kk]),"qmean":qmean[kk,nami,w].tolist()}
+            db[key] = {"t":times.tolist(),"mean":mass_mean[kk,nami,w].tolist(),"std":mass_std[kk,nami,w].tolist(),"n":int(Nprtcl[kk]),"nmean":nmean[kk,nami].tolist()}
+            db[key].update({f"qmean_{qn}":qmean[kk,nami,w,:,iq].tolist() for iq,qn in enumerate(qnames)})
             db[key].update({f"dmass_{qn}":p.tolist() for qn,p in zip(qnames,prof[kk,nami,w])})
             db[key].update({f"vals_{qn}":p.tolist() for qn,p in zip(qnames,vals[kk,nami,w])})
 with open(f"mass_data_{wg}.json", "w") as f:

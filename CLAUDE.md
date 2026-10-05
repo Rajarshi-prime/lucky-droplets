@@ -34,86 +34,82 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # Words to avoid in code and responses
 
-- wire, mid-migration, live, simply, just, engine, landed,
+- wire, mid-migration, live, simply, just, engine, landed, folded
 
 
 ## What this is
 
-A pseudo-spectral direct numerical simulation (DNS) of forced homogeneous isotropic turbulence, one-way coupled to cloud-droplet-like inertial particles ("lucky droplets"). Velocity fields are evolved in Fourier space; particles/droplets are represented either as a continuum number-density field advected under the "slow manifold" approximation (small Stokes number) or as explicit Lagrangian point particles (finite Stokes number, the "big" particles). Parallelism is MPI with a 1D slab decomposition along x; particle-to-grid/grid-to-particle interpolation is numba-JIT-accelerated.
+Pseudo-spectral DNS of forced homogeneous isotropic turbulence, one-way coupled to cloud-droplet-like inertial particles ("lucky droplets"). Velocity evolves in Fourier space. Droplets are either a continuum number-density field `n` under the slow-manifold approximation (small Stokes) or explicit Lagrangian points (finite Stokes, the "big" particles). MPI with a 1-D slab decomposition along x; grid-particle interpolation is numba-JIT.
 
-Intended runtime is an MPI cluster; this sandbox only has a small local `data_cosine/` sample dataset.
+Runtime is an MPI cluster. This sandbox holds only a small `data_cosine/` sample (one `time_89.0` folder at `N_256_Re_398.1`), gitignored, not the real dataset.
 
 ## Commands
 
-There is no build step, linter, test suite, or dependency manifest in this repo. The runtime dependencies, taken from the imports, are `numpy`, `scipy`, `h5py`, `mpi4py`, `numba`.
-
-Simulations are MPI programs invoked as (per-script arguments are positional, always `<kmax*eta> <gravity 0|1>` as the last two argv entries):
+No build step, linter, tests, or dependency manifest. Imports need `numpy`, `scipy`, `h5py`, `mpi4py`, `numba`.
 
 ```
 mpirun -np <num_process> python3 <forced-dns-*.py> <kmax_eta> <gravity_flag>
 ```
 
-Each script reads only `sys.argv[-1]` (gravity on/off) and `sys.argv[-2]` (the target `kmax*eta`, variable `m`, which sets the viscosity); everything else is edited in the parameter block near the top of the file. `<num_process>` must divide `N` (grid resolution, hardcoded per-script, typically 256), since `Np = N//num_process` slices per rank.
+Only `sys.argv[-2]` (target `kmax*eta`, sets viscosity) and `sys.argv[-1]` (gravity 0|1) are read; the rest is the parameter block at the top of each file. `num_process` must divide `N`, since a rank owns `Np = N//num_process` slices. Ask the user to run these.
 
-Do not actually run these commands yourself in this sandbox — ask the user to run them.
+## The five `forced-dns-*.py` entry points
 
-## Architecture
+Independent, mostly duplicated top-level scripts, not a library with flags. Startup is shared (`initial_conditions.py`); checkpointing is not, so a `save()` change needs porting by hand.
 
-### The five `forced-dns-*.py` entry points
+| script | what differs |
+| --- | --- |
+| `forced-dns-sm.py` | baseline, forced NS + slow-manifold `n`, no particles. **Imitate this for style.** |
+| `forced-dns-sm-clip-new.py` | `clip_zero(n, target = 1)` by spline/Newton root-find instead of clip-and-rescale |
+| `forced-dns-log-sm.py` | evolves `log(n)`; RHS carries `vgradlogn`/`divv` not `divvn`; has `clip_error` |
+| `forced-dns-sm-big.py` | Lagrangian particles for several Stokes numbers at once; only variant placing them by the Q criterion |
+| `forced-dns-sm-big-rndm.py` | stochastic particle forcing (`stoch_updt`); no density field; restarts from the oldest folder |
 
-These are independent, mostly-duplicated top-level scripts (not a shared library with variant flags) — each hardcodes its own grid size, timestep, save path, and physics. Startup is now shared (`initial_conditions.py`); checkpointing still is not, so a change to `save()` needs porting across the relevant variants by hand.
+Order inside each: parameter block → `forcing()` → `clip_*()` → `full_RHS()` → `RK4()` → `save()` → `evolve_and_save()`. All of it runs at module level, so importing one starts the simulation. `load_hdf5()` survives in each but nothing calls it. Reads come from `loadPath` (absolute, cluster), writes go to a relative `savePath`; the two need not agree.
 
-- `forced-dns-sm.py` — baseline: forced NS + slow-manifold number-density field `n`, no explicit particles. This is the file to imitate for style.
-- `forced-dns-sm-clip-new.py` — same as `sm.py` but replaces the naive "clip negative `n` to zero and rescale" step with a spline/Newton root-find (`clip_zero(n, target = 1)`) that clips to a target mean exactly.
-- `forced-dns-log-sm.py` — evolves `log(n)` instead of `n` directly (avoids needing clipping for positivity), different `dt`/`dt_save`/`M0`. Its RHS carries `vgradlogn`/`divv` terms instead of the `divvn` term the others use, and it has `clip_error` rather than `clip_zero`.
-- `forced-dns-sm-big.py` — adds explicit Lagrangian "big" particles (`MPI_particles` from `particles.py`) for several Stokes numbers and initial conditions at once, alongside the slow-manifold field for the small particles. The only variant that places particles from scratch by the Q criterion.
-- `forced-dns-sm-big-rndm.py` — big-particle variant with stochastic forcing on the particles (`stoch_updt` in `particles.py`). It has no density field at all (no `n` argument anywhere in its RHS/RK4/save), and selects the oldest rather than the newest checkpoint folder on restart.
+## `initial_conditions.py`
 
-Common structure inside each script: a parameter block and grid/FFT setup at module level → `forcing()` → `clip_zero()`/`clip_error()` → `full_RHS()` (spectral RHS for velocity + scalar/log-density) → `RK4()` time integrator → `save()` (periodic checkpointing) → `evolve_and_save()` (the main time-stepping loop) → an `InitialConditions(...)` construction and the two startup calls. The scripts are straight-line: setup, loading, and the final `evolve_and_save(t, u, n)` call all run at module level, so importing one runs the simulation. `load_hdf5()` survives in each script but nothing calls it.
+`InitialConditions` owns both startup paths: load a saved state, or build a fresh one, chosen by `forcestart` and `start_big_particle`. Variants are constructor arguments, not separate code paths:
 
-### Read path vs write path differ
+- `mode` — `"all_stokes"` (both particle variants): newest folder per Stokes number, then the *minimum* across them, then one `dt_save` earlier, so every set has state and a partially-written folder is skipped. `"second_last"` for density-only variants; `"first"` unused.
+- `clip` / `ntransform` / `ndefault` — the variant's clip function; log-sm passes `np.log` and `0.0` since disk holds `n`. A 4-D `n` is clipped one Stokes row at a time, as the mean inside is a global sum.
+- `load_dealias` — `False` for big, `True` elsewhere.
+- `fresh_particles` — `"qcriterion"` (big) or `"velocity"` (rndm).
+- `init_name = None` for rndm, whose folders omit `_init_`. `particle_dir()` is the only place that name is built.
+- `n = None` for rndm; every density branch checks it.
 
-Every variant **reads** restart data from `loadPath`, an absolute cluster path defined next to `savePath` in the parameter block, and **writes** to a relative `savePath` under the working directory. The two do not have to agree — `sm-clip-new.py` writes to `./data_cosine_clip_new/...` and `sm-big-rndm.py` to `./data_cosine/forced_<isforcing>/stochastic/highhighn/N_<N>_Re_<re>`.
+`tdec = max(0, int(np.ceil(-np.log10(dt_save))))` sets the decimals in `time_<t>` names and appears **three times** — `InitialConditions.__init__` plus the parameter blocks of `big` and `rndm`, the only two that create `time_` folders. Keep them in step; changing `dt_save` renames the folders, so a run cannot restart from data saved under a different one.
 
-### `initial_conditions.py` — the shared startup, used by all five scripts
+`load_particles()` gives each rank the saved particles inside its own x-range, so the saved file count need not match the rank count. `load_num_slabs` is whatever the *writing* run used.
 
-`InitialConditions` owns both startup paths: find and load a saved state, or build a fresh one. Two switches in each script's parameter block choose between them — `forcestart` (fresh random velocity field vs. saved fields) and `start_big_particle` (place particles from scratch vs. load their saved state). Each script builds the grid, the spectral operators and the MPI fft helpers itself and passes them to the constructor; the class allocates its own scratch arrays, so the script's work buffers stay out of the interface.
+`restart.py` is superseded, imported by nothing, empty at HEAD.
 
-The variants are expressed as constructor arguments rather than as separate code paths:
+## `particles.py`
 
-- `mode` — which time folder to restart from. Both particle variants use `"all_stokes"`: per Stokes number, the newest folder holding that Stokes number's particle directory, then the *minimum* across Stokes numbers, then one `dt_save` earlier. The minimum guarantees a time at which every particle set has state; the `dt_save` step avoids a final folder that was still being written. The density-only variants use `"second_last"`, which just sorts by modification time. `"first"` (oldest folder) is still supported but no longer used by any script.
-- `clip` — the variant's `clip_zero` or `clip_error`, applied once to the density after it is loaded or built. For a 4-D `n` it is applied one Stokes row at a time, because the mean inside it is a global sum across ranks.
-- `ntransform` / `ndefault` — log-sm passes `np.log` and `0.0`, since it evolves `log(n)` while the files on disk hold `n`.
-- `load_dealias` — sm, clip and log multiply by `dealias` when going to physical space after loading; big does not. Passed as `False` there.
-- `fresh_particles` — how particles are placed when starting them from scratch: `"qcriterion"` (big) or `"velocity"` (rndm, which keeps the positions `MPI_particles` gave them and only interpolates the fluid velocity onto them). Only consulted when `start_big_particle` is set.
-- `init_name` — `None` for rndm, whose particle folders are `<wg>_stb_<stb>_sts_<sts>` with no `_init_` suffix. `particle_dir()` is the single place that name is built.
-- `n = None` — rndm has no density field at all, and every density branch checks for this.
+`MPI_particles` holds position/velocity/mass, interpolates both ways with a cosine kernel (`interp_cosine`, `exterp_cosine_*`, `interp_exterp_cosine_*`), exchanges particles across slab boundaries (`particle_exchange`), and carries the particle RHS (`pRHS`, `pRHS_inertial`, `stoch_updt`). The kernels `_calc_usend_numba`, `_calc_uadd_numba_scalar/vector` are `@njit(parallel=True)` free functions — keep them numba-compatible.
 
-A `time_<t>` folder name carries `tdec = max(0, int(np.ceil(-np.log10(dt_save))))` decimals, so `0.5` and `0.1` give one and `0.05` gives two. That line appears three times — in `InitialConditions.__init__` (as `self.tdec`, used by `find_path` to match) and in the parameter block of `big` and `rndm` (used by their `save()` to write). Those two are the only scripts that create `time_` folders; the other three always write to `savePath/"last"`. Keep the three copies in step, and note that changing `dt_save` renames the folders, so a run cannot restart from data saved under a different `dt_save`.
-
-There is one particle loader, `load_particles()`: each rank takes the saved particles falling inside its own x-range, so the number of saved files need not match the rank count. Reading `state_{rank}.npz` alone is the special case where the saved run used as many slabs as this run has ranks — rndm's old rank-wise reader was exactly that case and has been removed.
-
-Fields are sharded across `load_num_slabs` `Fields_k_{slab}.npz` files, and `load_num_slabs` is whatever the *writing* run used — it is independent of the current run's `num_process`. `load_fields()` reads the velocity and the density in a single pass, caching each slab's density file so a slab is opened once rather than once per x-slice.
-
-### `restart.py` — standalone, superseded, not used by any script
-
-An earlier refactor of the same restart logic, now covered by `InitialConditions`. **No script imports it**, so changing it alone changes nothing that runs. Its contents are uncommitted (the file is empty at HEAD), which is why it was left in place rather than removed.
-
-### `particles.py` — Lagrangian particle engine
-
-`MPI_particles` holds per-particle state (position, velocity, mass) and does cosine-kernel interpolation between the Eulerian grid and particle positions (`uinterp_cosine`, `interp_cosine`, `exterp_cosine_scalar/vector`, `interp_exterp_cosine_scalar/vector`), particle exchange across MPI ranks when particles cross slab boundaries (`particle_exchange`), and the particle RHS (`pRHS`, `pRHS_inertial`, `stoch_updt`). The core interpolation/deposition kernels (`_calc_usend_numba`, `_calc_uadd_numba_scalar`, `_calc_uadd_numba_vector`) are free functions decorated with `@njit(parallel=True)` — keep them numba-compatible (no Python objects, no unsupported numpy features) when editing.
-
-### Analysis/plotting scripts
-
-`plot.py`, `plot-correlation.py`, and the dated `plot-YYYYMMDD.py` files are standalone, cell-based (`#%%`) analysis scripts that read simulation output from `data_cosine/...` and are not imported by anything. They are disposable/exploratory — new analysis is normally added as a new dated file rather than by editing an old one in place.
+Weights are `(1 + cos(pi*d/(2*dx)))/4` per direction, non-negative and summing to 1, so interpolation is a convex combination: a non-negative field cannot come back negative or overshoot the grid range.
 
 ## Data layout
 
 `data_cosine/forced_<True|False>/N_<N>_Re_<Re>/time_<t>/`:
-- `Fields_k_<slab>.npz` — Fourier-space velocity field shards, keyed `uk`, `vk`, `wk`.
-- `Energy_spectrum.npz`, `Flux_spectrum.npz` — diagnostics saved alongside the fields.
-- Per-Stokes-number subdirectories holding `n_<rank>.npz` (number density) and/or `state_<rank>.npz` (big-particle state: `pos`, `vel`, `mass`, `prtclid`, `umat`).
+- `Fields_k_<slab>.npz` — velocity shards, keys `uk`, `vk`, `wk`.
+- `Energy_spectrum.npz`, `Flux_spectrum.npz`.
+- Per-Stokes subdirectories with `n_<slab>.npz` (key `n`, shape `(Np,N,N)`, that slab's x-range) and/or `state_<rank>.npz` (`pos`, `vel`, `mass`, `prtclid`, `umat`).
 
-The subdirectory naming is inconsistent across variants and across vintages of saved data — both `<wg>_sts_<sts>_stb_<stb>_init_<init>` and `<wg>_stb_<stb>_sts_<sts>_init_<init>` orderings appear in the same sample `time_` folder. The density field uses the first ordering (built inline in `load_fields`) and the particle state the second (`particle_dir`), so code that searches for these directories must match the ordering the writing script used.
+**Two subdirectory orderings coexist in the same `time_` folder.** Density is `<wg>_sts_<sts>_stb_<stb>_init_<init>` (inline in `load_fields`); particle state is `<wg>_stb_<stb>_sts_<sts>_init_<init>` (`particle_dir`). Match the ordering the writing script used.
 
-`data_cosine/` in this repo is a small local sample (one `time_89.0` folder at `N_256_Re_398.1`); it is gitignored and is not the real dataset, which lives on the cluster.
+## Analysis scripts
+
+`plot.py`, `plot-correlation.py` and the dated `plot-YYYYMMDD.py` files are standalone `#%%` cell scripts reading `data_cosine/...`, imported by nothing. New analysis normally goes in a new dated file.
+
+`plot-20261005-mod.py` is the current one: it interpolates flow quantities onto the big particles and conditions droplet growth on them.
+
+- `load_u` was filling one x-plane only, since `Np` is 1 when `num_process = 256`; `rank_data = range(0,N)` fixes it, and the same fix went into every `plot-*.py` that has a `load_u`. Any `urms`/`re_lmbd` recorded before that came from a near-empty field.
+- `calc_invariants(u)` builds `A_ij = du_i/dx_j` spectrally and returns `om2`, `s2`, `R`. With `A = S + W`, `aa - at = omega^2` and `0.5*(aa + at) = S_ij S_ij`, so neither `S` nor `W` is formed — that halves peak memory to about 2.6 GB.
+- `interp_quantities` interpolates `om2, s2, R, n` at the droplets and stacks `Q, om2, s2, R, dissip, n, urel`. `Q = om2/4 - s2/2` and `dissip = 2*nu*s2` are linear in the interpolated fields, so they need no separate interpolation.
+- `load_series` walks time on the outside, so the flow is computed once per snapshot and shared by all 20 `(stb, init)` pairs, and accumulates running histograms instead of holding per-particle arrays. `all` and `top10` come out of one pass.
+- `MPI_particles` runs with `comm = MPI.COMM_WORLD` at size 1 (`plot-correlation.py` set that precedent). These scripts need a plain `python` process: `interpmat` is sized `Nprtcl//comm.size` while the loaders read the whole domain on every rank.
+- json keys: `t`, `mean`, `std`, `n`, `nmean`, then `qmean_<q>`, `dmass_<q>`, `vals_<q>` per entry of `qnames`.
+
+Known and unfixed there: `mask_max_growers` uses `PchipInterpolator`, which extrapolates when `cdf[0] > frac` and can silently make `top10` identical to `all`; the `dmass` fallback in `load_instant` is per-rank, so a partly-missing next folder pairs the wrong droplets; `Q_bins`/`R_bins` are wider than the fluctuations they resolve; `urel_bins` spans about 40x the real slip; `dissip` duplicates `s2` exactly.
