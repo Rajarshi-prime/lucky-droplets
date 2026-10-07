@@ -79,7 +79,7 @@ if rank ==0 : print(kx_diff.shape, ky_diff.shape, kz_diff.shape)
 lp = 1 # Hyperviscosity power
 # nu0 = 8.192 #! Viscosity for N = 1
 # nu0 = 4.714 #! Viscosity from Pope's 256 run 
-nu0 = 0.59 #! Viscosity for N = 1
+nu0 = 0.5 #! Viscosity for N = 1
 m = float(sys.argv[-2]) #! Desired kmax*eta
 kmax = N*2**0.5//3
 eta = m/kmax
@@ -105,7 +105,7 @@ nmin_thresh = TWO_PI**3/nprtcls0/(dx*dy*dz)
 
 #----  Kolmogorov length scale - \eta \epsilon etc...---------
 
-f0 = (nu0)**3 * TWO_PI**3/ nshells #! Total power input at each shells
+f0 = 0.5 * TWO_PI**3/ nshells #! Total power input at each shells
 
 
 if rank ==0 : print(f" Power input  density : {nshells*f0/TWO_PI**3} \n Viscosity : {nu}, Re : {1/nu},dt : {dt}, desired t_eta {tf}")
