@@ -206,7 +206,7 @@ class MPI_particles:
 
     
     def update_intrinsic(self):
-        """Sends particles to the proper ranks, and calculates the intrinsic variables"""
+        """Calculates the intrinsic variables"""
         
         self.st = (self.coord[:,-1]/self.factor)**(2/3.)
         self.rhs = 0.0*self.coord
@@ -295,7 +295,7 @@ class MPI_particles:
             count += args[i].shape[-1]
             
         # ------------------- cleaning up ------------------- #
-        self.comm.Barrier()
+        # self.comm.Barrier()
         del outcond,cond, sendbuf,recvbuf
         # gc.collect()
         # --------------------------------------------------- #
@@ -541,7 +541,7 @@ class MPI_particles:
             # --------------------------------------------------- #
         
         # ------------------- cleaning up ------------------- #
-        self.comm.Barrier()
+        # self.comm.Barrier()
         del pos,idx
         # gc.collect()
         # --------------------------------------------------- #
@@ -620,7 +620,7 @@ class MPI_particles:
             
         
         # ------------------- cleaning up ------------------- #
-        self.comm.Barrier()
+        # self.comm.Barrier()
         del pos, idx
         # gc.collect()
         # --------------------------------------------------- #
@@ -894,8 +894,7 @@ class MPI_particles:
 
         
         self.rhs[:,:self.d] = coord[:,self.d:2*self.d]
-        self.rhs[:,self.d:2*self.d] =  (self.interpmat[:,:self.d]- coord[:,self.d:2*self.d])/(self.st[:,None] *self.tau_eta)  
-        + (self.decelerationfactor*(1 + (self.st_s/self.st)**0.5)**2/(self.st*self.tau_eta)**0.5*self.interpmat[:,-1]*np.linalg.norm(coord[:,self.d:self.d*2] - self.interpmat[:,self.d: 2*self.d],axis = 1) )[:,None]*(self.interpmat[:,self.d: 2*self.d] - coord[:,self.d:self.d*2]) 
+        self.rhs[:,self.d:2*self.d] =  (self.interpmat[:,:self.d]- coord[:,self.d:2*self.d])/(self.st[:,None] *self.tau_eta)  + (self.decelerationfactor*(1 + (self.st_s/self.st)**0.5)**2/(self.st*self.tau_eta)**0.5*self.interpmat[:,-1]*np.linalg.norm(coord[:,self.d:self.d*2] - self.interpmat[:,self.d: 2*self.d],axis = 1) )[:,None]*(self.interpmat[:,self.d: 2*self.d] - coord[:,self.d:self.d*2]) 
         self.rhs[:,2*self.d - 1] -= self.g #! Adding gravity in the appropriate units.
         self.rhs[:,-1] = self.exterpmat[:,0]
         

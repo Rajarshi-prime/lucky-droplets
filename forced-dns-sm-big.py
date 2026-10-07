@@ -34,9 +34,9 @@ dt =  0.2*0.256/N #! Such that increasing resolution will decrease the dt
 dtmax = 5*0.256/N
 dtmin = 0.2*0.256/N
 T = 100
-dt_save = 0.5
-tdec = max(0, int(np.ceil(-np.log10(dt_save)))) #! decimals in the time_ folder names
-st = round(dt_save/dt) #!Savestep : Confusing
+dt_save_fields = 1.0
+dt_save_particles = 0.1 #! dt_save_fields should be a multiple of this
+tdec = max(0, int(np.ceil(-np.log10(min(dt_save_fields,dt_save_particles))))) #! decimals in the time_ folder names
 sts = 0.001
 stb_s = [0.017,0.017/4, 0.017*4,0.017*6.35]*5 #! For 5 different initial conditions.
 uniquestbs = len(np.unique(stb_s))
@@ -135,7 +135,6 @@ param["Gridsize"] = N
 param["Processes"] = num_process
 param["Final_time"] = T
 param["time_step"] = dt
-param["interval of saving indices"] = st
 
 ## ––––––––––––––––––––––––––––––––-
 
@@ -180,7 +179,9 @@ v  = np.zeros((3, Np, N, N), dtype= np.float64)
 vtemp  = np.zeros((3, Np, N, N), dtype= np.float64)
 vn  = np.zeros((3, Np, N, N), dtype= np.float64)
 omg= np.zeros((3, Np, N, N), dtype= np.float64)
-n = np.zeros((len(stb_s),Np,N,N))
+A = np.zeros((3,3,Np,N,N), dtype= np.float64)
+invar = np.zeros((3,Np,N,N), dtype= np.float64)
+n = np.zeros((len(stb_s),Np,N,N), dtype= np.float64)
 ntemp = n[0].copy()
 nnew = n.copy()
 
@@ -307,14 +308,21 @@ def forcing(uk,fk):
     return fk*isforcing*dealias
     
      
-def clip_zero(x):
+def clip_zero(x,list = False):
     """Clips negative values to zero and rescales the to conserve the mean
     """
-    oldmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
-    x[:] = np.clip(x,0,None)
-    newmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
+    if not list:
+        oldmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
+        x[:] = np.clip(x,0,None)
+        newmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
+        return x*oldmean/newmean
     
-    return x*oldmean/newmean
+    for jj in range(len(x)):
+        oldmean = comm.allreduce(np.sum(x[jj]),op = MPI.SUM)/N**3
+        x[jj] = np.clip(x[jj],0,None)
+        newmean = comm.allreduce(np.sum(x[jj]),op = MPI.SUM)/N**3
+        x[jj] *= oldmean/newmean
+    return x
 
 
 
@@ -384,9 +392,9 @@ def full_RHS(t,uk, n,sump, tempcoord, stbs,ku =ku,kn = kn,fc = fc,visc = 1,forc 
     vk[1] = uk[1] - tps*(ku[1] - rhsvk)*dealias #! DuDt =  ku - nonlinear part.
     vk[2] = uk[2] - tps*(ku[2] - rhswk)*dealias #! DuDt =  ku - nonlinear part.
     
-    vtemp[0] = irfft_mpi(vk[0]*phase_k*dealias, v[0])
-    vtemp[1] = irfft_mpi(vk[1]*phase_k*dealias, v[1])
-    vtemp[2] = irfft_mpi(vk[2]*phase_k*dealias, v[2]) 
+    vtemp[0] = irfft_mpi(vk[0]*phase_k*dealias, vtemp[0])
+    vtemp[1] = irfft_mpi(vk[1]*phase_k*dealias, vtemp[1])
+    vtemp[2] = irfft_mpi(vk[2]*phase_k*dealias, vtemp[2]) 
     
     v[0] = irfft_mpi(vk[0]*dealias, v[0])
     v[1] = irfft_mpi(vk[1]*dealias, v[1])
@@ -415,7 +423,7 @@ def full_RHS(t,uk, n,sump, tempcoord, stbs,ku =ku,kn = kn,fc = fc,visc = 1,forc 
         fck[:] = rfft_mpi(fc, fck)*dealias
         kn[ii] = irfft_mpi(-divvnk - fck ,kn[ii]) #! fck is the mass growth rate. so the - sign
     
-    comm.Barrier()    
+    # comm.Barrier()    
     return ku,kn,kps,sump
 
     
@@ -427,7 +435,7 @@ def RK4(t,h,stbs, uk,n,uknew = uknew, nnew = nnew,sump = sump, tempcoord = tempc
         sump[j] = stbs[j].coord*1.0
         tempcoord[j] = stbs[j].coord*1.0
     comm.Barrier()
-    ku[:],kn[:],kps[:],sump[:] = full_RHS(t,uk, clip_zero(n),sump,tempcoord,stbs)
+    ku[:],kn[:],kps[:],sump[:] = full_RHS(t,uk, clip_zero(n,list = True),sump,tempcoord,stbs)
     for j in range(len(stb_s)): 
         sump[j] += h/6.0*kps[j]
         tempcoord[j] = stbs[j].coord + h/2 *kps[j]
@@ -435,21 +443,21 @@ def RK4(t,h,stbs, uk,n,uknew = uknew, nnew = nnew,sump = sump, tempcoord = tempc
     nnew += h/6.0*kn
     
 
-    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h/2,uk + ku*h/2, clip_zero(n + kn*h/2),sump, tempcoord, stbs)
+    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h/2,uk + ku*h/2, clip_zero(n + kn*h/2,list = True),sump, tempcoord, stbs)
     for j in range(len(stb_s)): 
         sump[j] += h/3.*kps[j]
         tempcoord[j] = stbs[j].coord + h/2 *kps[j]
     uknew += h/3.0*ku
     nnew += h/3.0*kn
     
-    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h/2,uk + ku*h/2, clip_zero(n + kn*h/2),sump, tempcoord, stbs)
+    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h/2,uk + ku*h/2, clip_zero(n + kn*h/2, list = True),sump, tempcoord, stbs)
     for j in range(len(stb_s)): 
         sump[j] += h/3.0*kps[j]
         tempcoord[j] = stbs[j].coord + h *kps[j]
     uknew += h/3.0*ku
     nnew += h/3.0*kn
     
-    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h,uk + ku*h, clip_zero(n + kn*h),sump, tempcoord, stbs)
+    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h,uk + ku*h, clip_zero(n + kn*h, list = True),sump, tempcoord, stbs)
     for j in range(len(stb_s)): 
         sump[j] += h/6.*kps[j]
         stbs[j].coord = 1.0*sump[j]
@@ -478,25 +486,36 @@ def load_hdf5(paths, u, n,tps =tps, tf = tf):
     
     return u,n
 
-def save(i,tt,uk,n,stbs,tf = tf, tps = tps): 
+def save(i,tt,uk,n,stbs,savefields = True,tf = tf, tps = tps):
     # return None
     # div = diff_x(u[0], rhsu) + diff_y(u[1],rhsv) + diff_z(u[2],rhsw)
     # if rank == 0: print(f"Rank {rank} has divergence {np.sum(np.abs(div))}")
-    ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
-    for ii in range(len(stb_s)):
-        sump[ii] = stbs[ii].coord*1.0
-        tempcoord[ii] = stbs[ii].coord*1.0
-    ku[:],_,_,_ = full_RHS(t,uk, n,sump, tempcoord, stbs,visc = 0,forc = 0)
-    Pik[:] = np.real(np.conjugate(uk[0])*ku[0]+np.conjugate(uk[1])*ku[1]+ np.conjugate(uk[2])*ku[2])*dealias*normalize
-    Pik_arr[:] = comm.allreduce(e3d_to_e1d(Pik),op = MPI.SUM)
-    Pik_arr[:] = np.cumsum(Pik_arr[::-1])[::-1]
-    
-    ek_arr[:] = 0.0
-    ek_arr[:] = comm.allreduce(e3d_to_e1d(ek),op = MPI.SUM) #! This is the shell-summed ek array.
+    if savefields:
+        ek[:] = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2 + np.abs(uk[2])**2)*normalize #! This is the 3D ek array
+        for ii in range(len(stb_s)):
+            sump[ii] = stbs[ii].coord*1.0
+            tempcoord[ii] = stbs[ii].coord*1.0
+        ku[:],_,_,_ = full_RHS(t,uk, n,sump, tempcoord, stbs,visc = 0,forc = 0)
+        Pik[:] = np.real(np.conjugate(uk[0])*ku[0]+np.conjugate(uk[1])*ku[1]+ np.conjugate(uk[2])*ku[2])*dealias*normalize
+        Pik_arr[:] = comm.allreduce(e3d_to_e1d(Pik),op = MPI.SUM)
+        Pik_arr[:] = np.cumsum(Pik_arr[::-1])[::-1]
+
+        ek_arr[:] = 0.0
+        ek_arr[:] = comm.allreduce(e3d_to_e1d(ek),op = MPI.SUM) #! This is the shell-summed ek array.
     
     u[0] = irfft_mpi(uk[0], u[0])
     u[1] = irfft_mpi(uk[1], u[1])
     u[2] = irfft_mpi(uk[2], u[2])
+
+    for ii in range(d):
+        A[ii,0] = irfft_mpi(1j*kx*uk[ii], A[ii,0])
+        A[ii,1] = irfft_mpi(1j*ky*uk[ii], A[ii,1])
+        A[ii,2] = irfft_mpi(1j*kz*uk[ii], A[ii,2])
+    aa = np.einsum('ij...,ji...->...',A,A)
+    at = np.einsum('ij...,ij...->...',A,A)
+    invar[0] = at - aa #! aa is tr(A^2) and at is tr(A A^T), so at - aa is omega^2
+    invar[1] = 0.5*(aa + at)
+    invar[2] = -np.einsum('ij...,jk...,ki...->...',A,A,A,optimize = True)/3.
     # ––––––––––- ––––––––––––––––––––––––––––
     #                 Saving the data (field)
     # ––––––––––- ––––––––––––––––––––––––––––
@@ -506,17 +525,19 @@ def save(i,tt,uk,n,stbs,tf = tf, tps = tps):
     except FileExistsError: pass
     comm.Barrier()
 
-    np.savez_compressed(f"{new_dir}/Fields_k_{rank}",uk = uk[0],vk = uk[1],wk = uk[2])
-    np.savez_compressed(f"{new_dir}/Energy_spectrum",ek = ek_arr)
-    np.savez_compressed(f"{new_dir}/Flux_spectrum",Pik = Pik_arr)
+    if savefields:
+        np.savez_compressed(f"{new_dir}/Fields_k_{rank}",uk = uk[0],vk = uk[1],wk = uk[2])
+        np.savez_compressed(f"{new_dir}/Energy_spectrum",ek = ek_arr)
+        np.savez_compressed(f"{new_dir}/Flux_spectrum",Pik = Pik_arr)
     for jj in range(len(stb_s)):
         
         if Nprtcl[jj] > 0: 
-            new_dir_s = new_dir/f"{wg}_sts_{tps/tf:.3f}_stb_{stb_s[jj]:.3f}_init_{init_name[jj]}/"
-            try: new_dir_s.mkdir(parents=True,  exist_ok=True)
-            except FileExistsError: pass
-            comm.Barrier()
-            np.savez_compressed(new_dir_s/f"n_{rank}",n = n[jj])
+            if savefields:
+                new_dir_s = new_dir/f"{wg}_sts_{tps/tf:.3f}_stb_{stb_s[jj]:.3f}_init_{init_name[jj]}/"
+                try: new_dir_s.mkdir(parents=True,  exist_ok=True)
+                except FileExistsError: pass
+                comm.Barrier()
+                np.savez_compressed(new_dir_s/f"n_{rank}",n = n[jj])
             
             new_dir_b = new_dir/f"{wg}_stb_{stb_s[jj]:.3f}_sts_{tps/tf:.3f}_init_{init_name[jj]}"
             try: new_dir_b.mkdir(parents=True,  exist_ok=True)
@@ -526,11 +547,11 @@ def save(i,tt,uk,n,stbs,tf = tf, tps = tps):
             stb = stbs[jj]
             stb.coord,[stb.interpmat,stb.exterpmat,stb.prtclid] = stb.send(stb.coord,[stb.interpmat,stb.exterpmat,stb.prtclid])
             stb.st = (stb.coord[:,-1]/stb.factor)**(2/3.)
-            stb.interpmat = stb.interp_cosine(stb.coord,np.concatenate((u,u,n[jj,None,...]), axis = 0))
-            np.savez_compressed(new_dir_b/f"state_{rank}.npz",pos= stb.coord[:,:d],vel = stb.coord[:,d:2*d], mass = stb.coord[:,-1],prtclid = stb.prtclid, umat = stb.interpmat[:,:d])
+            stb.interpmat = stb.interp_cosine(stb.coord,np.concatenate((u,invar,n[jj,None,...]), axis = 0))
+            np.savez_compressed(new_dir_b/f"state_{rank}.npz",pos= stb.coord[:,:d],vel = stb.coord[:,d:2*d], mass = stb.coord[:,-1],prtclid = stb.prtclid, umat = stb.interpmat[:,:d], om2 = stb.interpmat[:,d], s2 = stb.interpmat[:,d+1], R = stb.interpmat[:,d+2], n = stb.interpmat[:,-1])
         
         
-        else: 
+        elif savefields:
             new_dir_s = new_dir/f"{wg}_sts_{tps/tf:.3f}/"
             try: new_dir_s.mkdir(parents=True,  exist_ok=True)
             except FileExistsError: pass
@@ -544,19 +565,20 @@ def save(i,tt,uk,n,stbs,tf = tf, tps = tps):
     # ––––––––––- ––––––––––––––––––––––––––––
     #          Calculating and printing
     # ––––––––––- ––––––––––––––––––––––––––––
-    eng1 = comm.allreduce(np.sum(0.5*(u[0]**2 + u[1]**2 + u[2]**2)*dx*dy*dz), op = MPI.SUM)
-    eng2 = np.sum(ek_arr)
-    nmin = comm.allreduce(np.min(n), op = MPI.MIN)
-    nmax = comm.allreduce(np.max(n), op = MPI.MAX)
-    nmean = comm.allreduce(np.sum(n), op = MPI.SUM)/N**3
-    divmax = comm.allreduce(np.max(np.abs(diff_x(u[0],  rhsu) + diff_y(u[1],rhsv) + diff_z(u[2],rhsw))),op = MPI.MAX)
-    #! Needs to be changed 
-    # # dissp = -nu*comm.allreduce(np.sum((kc**(2*lp)*(np.abs(uk[0])**2 + np.abs(uk[1])**2) +sin_to_cos( ks**(2*lp)*(np.abs(uk[2])**2/alph**2 + np.abs(bk)**2)))), op = MPI.SUM)
-    if rank == 0:
-        print( "#––––––––––––––––––––––––––––","\n",f"Energy at time {tt} is : {eng1}, {eng2}","\n","#––––––––––––––––––––––––––––")
-        print(f"Maximum divergence {divmax}")
-        print(f"n mean, max ,min : {nmean, nmax, nmin}")
-        # print( "#––––––––––––––––––––––––––––","\n",f"Total dissipation at time {t[i]} is : {dissp}","\n","#––––––––––––––––––––––––––––")
+    if savefields:
+        eng1 = comm.allreduce(np.sum(0.5*(u[0]**2 + u[1]**2 + u[2]**2)*dx*dy*dz), op = MPI.SUM)
+        eng2 = np.sum(ek_arr)
+        nmin = comm.allreduce(np.min(n), op = MPI.MIN)
+        nmax = comm.allreduce(np.max(n), op = MPI.MAX)
+        nmean = comm.allreduce(np.sum(n), op = MPI.SUM)/N**3
+        divmax = comm.allreduce(np.max(np.abs(diff_x(u[0],  rhsu) + diff_y(u[1],rhsv) + diff_z(u[2],rhsw))),op = MPI.MAX)
+        #! Needs to be changed
+        # # dissp = -nu*comm.allreduce(np.sum((kc**(2*lp)*(np.abs(uk[0])**2 + np.abs(uk[1])**2) +sin_to_cos( ks**(2*lp)*(np.abs(uk[2])**2/alph**2 + np.abs(bk)**2)))), op = MPI.SUM)
+        if rank == 0:
+            print( "#––––––––––––––––––––––––––––","\n",f"Energy at time {tt} is : {eng1}, {eng2}","\n","#––––––––––––––––––––––––––––")
+            print(f"Maximum divergence {divmax}")
+            print(f"n mean, max ,min : {nmean, nmax, nmin}")
+            # print( "#––––––––––––––––––––––––––––","\n",f"Total dissipation at time {t[i]} is : {dissp}","\n","#––––––––––––––––––––––––––––")
     comm.Barrier()
     return "Done!"    
     
@@ -587,8 +609,9 @@ def evolve_and_save(t,  u,n):
         calc_time += time() - t3
         if rank == 0:  print(f"step {i} in time {time() - t3}", end= '\r',file = sys.stderr)
         ## ––––––––––––- saving the data –––––––––––––––––––– ##
-        if abs(np.sin(tt/dt_save*PI)) - np.sin(0.5*h/dt_save*PI) < 1e-12:
-            save(i,tt,uk,n,stbs)
+        savefields = abs(np.sin(tt/dt_save_fields*PI)) - np.sin(0.5*h/dt_save_fields*PI) < 1e-12
+        if savefields or abs(np.sin(tt/dt_save_particles*PI)) - np.sin(0.5*h/dt_save_particles*PI) < 1e-12: #! every save writes particles, as a fields folder without them cannot be restarted from
+            save(i,tt,uk,n,stbs,savefields)
         ## –––––––––––––––––––––––––––––––––––––––––––––––––– ##
         t3 = time()
         
@@ -603,7 +626,7 @@ def evolve_and_save(t,  u,n):
             minst = np.min(stbs[j].st) if len(stbs[j].st.ravel()) > 0 else 65536
             stmin = comm.allreduce(minst,op = MPI.MIN)
             hnew = min(hnew,0.1*stmin)
-            n[j] = clip_zero(nnew[j])
+            n[j] = clip_zero(nnew[j],list =  True)
         uknew[:] = (uknew)*hypervisc
         h = hnew
         if rank==0: print(f"For next step h : {h}")
@@ -639,7 +662,7 @@ def evolve_and_save(t,  u,n):
  
         ## ––––––––––––––––––––––––––––––––––––––––––––––––––––––-
         if uk.max() > 100*N**3 : 
-            print("Threshold exceeded at time", t[i+1], "Code about to be terminated")
+            print("Threshold exceeded at time", tt, "Code about to be terminated")
             comm.Abort()
         
         
@@ -648,7 +671,7 @@ def evolve_and_save(t,  u,n):
         tt += h
     ## –––––––––– Saving the final data ––––––––––––
     save(i+1,tt, uk,n,stbs)
-    if rank ==0: print(f"average calculation time per step {calc_time/(t.size-1)}")
+    if rank ==0: print(f"average calculation time per step {calc_time/(i)}")
     ## ––––––––––––––––––––––––––––––––––––––––––––-
 
     
@@ -668,7 +691,7 @@ for i,stb in enumerate(stb_s):
 ic = InitialConditions(comm, N, L, d, loadPath, u, uk, n,
                        kx, ky, kz, k, kint, dealias, invlap, normalize, einit,
                        rfft_mpi, irfft_mpi, e3d_to_e1d,
-                       wg, tps, tf, dt_save,
+                       wg, tps, tf, dt_save_fields,
                        mode = "all_stokes", clip = clip_zero, load_dealias = False,
                        start_big_particle = start_big_particle,
                        phase_k = phase_k, conjphase_k = conjphase_k,

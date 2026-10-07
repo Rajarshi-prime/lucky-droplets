@@ -18,7 +18,7 @@ N =256
 num_process = 256
 Np = N//num_process
 dt_save = 0.5
-gravity = True
+gravity = False
 wg = "with_g" if gravity else "wo_g"
 datapath = lambda t,sts,stb,name: pathlib.Path(f"/mnt/pfs/rajarshi.chattopadhyay/codes/lucky-droplets/data_cosine/forced_True/N_256_Re_398.1/time_{t:.1f}/{wg}_sts_{sts:.3f}_stb_{stb:.3f}_init_{name}")
 sts = 0.001
@@ -130,10 +130,10 @@ def load_n(path):
 
 def calc_invariants(u):
     A = irfftn(1j*np.einsum('j...,i...->ij...',np.array([kx,ky,kz]),rfftn(u,axes = (-3,-2,-1))),s = (N,N,N),axes = (-3,-2,-1))
-    aa = np.einsum('ij...,ij...->...',A,A)
-    at = np.einsum('ij...,ji...->...',A,A)
+    aa = np.einsum('ij...,ji...->...',A,A)
+    at = np.einsum('ij...,ij...->...',A,A)
     R = -np.einsum('ij...,jk...,ki...->...',A,A,A,optimize = True)/3.
-    return aa - at, 0.5*(aa + at), R #! A is symmetric plus antisymmetric, so these two contractions give omega^2 and S_ij S_ij
+    return at - aa, 0.5*(aa + at), R #! aa is tr(A^2) and at is tr(A A^T), so at - aa is omega^2
 
 # %%
 def load_instant(stb, init,time):
@@ -148,6 +148,7 @@ def load_instant(stb, init,time):
     id_next = np.zeros(0)
     for rank in range(num_process):
         data = np.load(prtcl_path(time,stb,init)/f"state_{rank}.npz")
+        print(f"Loaded data from {str(prtcl_path(time,stb,init)/f'state_{rank}.npz')}")
         try:
             data_next = np.load(prtcl_path(time + dt_save,stb,init)/f"state_{rank}.npz")
         except FileNotFoundError:
@@ -245,7 +246,8 @@ def load_series(times,stb_s,names,qbins = qbins):
     return mass_mean, mass_std, qmean, nmean, prof, vals
 #%%
 db = {}
-mass_mean,mass_std,qmean,nmean,prof,vals = load_series(times,stb_s,names)
+mass_mean,mass_std,qmean,nmean,prof,vals = load_series(times[:1],stb_s,names)
+#%%
 for kk,stb in enumerate(stb_s):
     for nami,init in enumerate(names):
         for w,which in enumerate(["all","top10"]):
@@ -258,4 +260,47 @@ with open(f"mass_data_{wg}.json", "w") as f:
     json.dump(db, f)
 
 raise SystemExit     
+# %%
+
+prtcls = MPI_particles(comm, L, N, Nprtcl[0],sts, 0.004,0, nu, tf,rhop,M0,3,X,Y,Z, x,y,z)
+prtcls.to_interp(3)
+#%%
+mass,urel, dmass, pos = load_instant(0.004,"Qpos",0.0)
+# %%
+fields_data= calc_invariants(load_u(prtcl_path(0,0.004,"Qpos").parent))
+# %%
+o2,s2,R = prtcls.interp_cosine(pos,np.stack(fields_data,axis = 0)).T
+# %%
+q = o2/4 - s2/2
+
+# %%
+print((q>0).sum())
+# %%
+s2.max()
+# %%
+pos1 = pos
+# %%
+np.unique(np.round(o2))
+# %%
+o21 = o2.copy()
+# %%
+o22 = o2.copy()
+# %%
+o21-o22
+# %%
+mass,urel, dmass, pos1 = load_instant(0.004,"Qpos",0.0)
+mass,urel, dmass, pos2 = load_instant(0.004,"Qneg",0.0)
+pos3 = np.random.uniform(0,L,pos1.shape)
+
+u = load_u(prtcl_path(0,0.004,"Qpos").parent)
+# %%
+prtcls.coord = np.zeros((pos1.shape[0],7))
+prtcls.coord[:,:3] = pos1
+o21,s21,R1 = prtcls.interp_cosine(pos1,u).T
+prtcls.coord[:,:3] = pos2
+o22,s22,R2 = prtcls.interp_cosine(pos2,u).T
+prtcls.coord[:,:3] = pos3
+o23,s23,R3 = prtcls.interp_cosine(pos3,u).T
+# %%
+(o21-o23).max()
 # %%
