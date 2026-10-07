@@ -20,6 +20,8 @@ class InitialConditions:
         self.Np = N//self.num_process
         self.sx = slice(self.rank*self.Np, (self.rank + 1)*self.Np)
         self.X = np.linspace(0, L, N, endpoint = False)
+        self.Y = np.linspace(0, L, N, endpoint = False)
+        self.Z = np.linspace(0, L, N, endpoint = False)
         self.dx = self.X[1] - self.X[0]
         self.TWO_PI = 2*np.pi
 
@@ -33,7 +35,6 @@ class InitialConditions:
 
         self.wg, self.dt_save = wg, dt_save
         self.sts = f"{tps/tf:.3f}" #! the small-particle Stokes number, as it appears in the folder names
-        self.tdec = max(0, int(np.ceil(-np.log10(dt_save)))) #! decimals in the time_ folder names, as save() writes them
         self.mode, self.clip = mode, clip
         self.ntransform, self.ndefault = ntransform, ndefault
         self.load_dealias, self.start_big_particle = load_dealias, start_big_particle
@@ -48,8 +49,9 @@ class InitialConditions:
 
         modes:
           "second_last" : the second newest time_* folder (sm, clip, log)
-          "all_stokes"  : the newest time_* folder holding particle states for EVERY
-                          Stokes number, then one dt_save before it (big, rndm)
+          "all_stokes"  : of the folders holding a Fields_k_*.npz, the newest holding
+                          particle states for EVERY Stokes number, then one dt_save
+                          before it (big, rndm)
           "first"       : the oldest time_* folder (unused)
         Falls back to loadPath/"last" with tinit = 0 if there is no time_* folder.
         """
@@ -61,13 +63,16 @@ class InitialConditions:
         elif self.mode == "first":
             paths = paths[0]
         elif self.mode == "all_stokes":
+            #! a restart needs the fields, which big writes less often. Newest first, so the first hit per Stokes number is the newest
+            paths = sorted([path for path in paths if any(path.glob("Fields_k_*.npz"))], key = lambda path: float(str(path).split("time_")[-1]), reverse = True)
             tlast = [0]*len(self.stb_s)
             for jj in range(len(self.stb_s)):
-                for path in paths[::-1]:
-                    if self.particle_dir(jj) in os.listdir(path):
-                        tlast[jj] = max(tlast[jj], float(str(path).split("time_")[-1]))
-            tlast = np.min(tlast) - self.dt_save #! Loading the second last
-            paths = [path for path in paths if f"time_{tlast:.{self.tdec}f}" in str(path)][0]
+                for path in paths:
+                    if (path/self.particle_dir(jj)).is_dir():
+                        tlast[jj] = float(str(path).split("time_")[-1])
+                        break
+            tlast = np.min(tlast) - self.dt_save if len(paths) > 1 else np.min(tlast) #! Loading the second last
+            paths = [path for path in paths if np.isclose(float(str(path).split("time_")[-1]), tlast)][0]
         else:
             raise SystemExit(f"Unknown restart mode {self.mode}")
         return paths, float(str(paths).split("time_")[-1])
@@ -104,7 +109,7 @@ class InitialConditions:
 
             if n is None: continue
             if subdirs is None:
-                if n.ndim >1: n[:,lidx] = self.ndefault
+                if n.shape[0] != self.Np : n[:,lidx] = self.ndefault
                 else: n[lidx] = self.ndefault
             elif len(subdirs) == 1 and n.ndim >1: #! one saved field shared by every Stokes number
                 row = nFields[subdirs[0]][idx]
@@ -202,7 +207,7 @@ class InitialConditions:
         kx, ky, kz, dealias = self.kx, self.ky, self.kz, self.dealias
         irfft_mpi, rfft_mpi = self.irfft_mpi, self.rfft_mpi
         diff_x, diff_y, diff_z = self.diff_x, self.diff_y, self.diff_z
-        X, Nprtcl, uniquestbs = self.X, self.Nprtcl, self.uniquestbs
+        X,Y,Z, Nprtcl, uniquestbs = self.X, self.Y, self.Z, self.Nprtcl, self.uniquestbs
 
         vtemp = np.zeros_like(u) #! scratch, only needed while the particles are being placed
         rhs = np.zeros_like(u)
@@ -257,7 +262,8 @@ class InitialConditions:
         Qlow10,Qhigh10  = calc_maxmin10_percentile(Q,Qmin,Qmax)
 
         countup10 = comm.allreduce(np.sum(Q>=Qhigh10),op = MPI.SUM)
-        if (countup10 <  Nprtcl).any() :   raise SystemExit(f"Need more percentile!")
+        countlow10 = comm.allreduce(np.sum(Q<Qlow10),op = MPI.SUM)
+        if (countup10 <  Nprtcl).any() or (countlow10 <  Nprtcl).any() :   raise SystemExit(f"Need more percentile!")
 
         Qpos10 = Q>=Qhigh10
         Qneg10 = Q< Qlow10
@@ -282,11 +288,12 @@ class InitialConditions:
                 offset = comm.scan(nprtcl_to_choose, op=MPI.SUM) -  nprtcl_to_choose
 
                 stb.coord = np.zeros((int(nprtcl_to_choose),stb.coord.shape[-1]))
+                stb.prtclid = offset +  np.arange(nprtcl_to_choose).reshape(-1,1)
                 if nprtcl_to_choose >0:
-                    stb.coord[:,0] = np.random.choice(X[ind1.ravel()],size = nprtcl_to_choose,replace = False)
-                    stb.coord[:,1] = np.random.choice(X[ind2.ravel()],size = nprtcl_to_choose,replace = False)
-                    stb.coord[:,2] = np.random.choice(X[ind3.ravel()],size = nprtcl_to_choose,replace = False)
-                    stb.prtclid = offset +  np.arange(nprtcl_to_choose).reshape(-1,1)
+                    sel = np.random.choice(ind1.size,size = nprtcl_to_choose,replace = False) #! one draw over the masked points, so the three indices stay together
+                    stb.coord[:,0] = X[self.sx][ind1[sel]]
+                    stb.coord[:,1] = Y[ind2[sel]]
+                    stb.coord[:,2] = Z[ind3[sel]]
 
         for  jj in range(len(self.stb_s)):
             stb = stbs[jj]
@@ -296,7 +303,6 @@ class InitialConditions:
             stb.coord[:,d:2*d] = stb.interpmat[:,:d]
             stb.coord[:,-1] = self.stb_s[jj]**1.5*stb.factor
             stb.update_intrinsic()
-
     def attach_velocity(self, stbs):
         """Gives already-placed particles the fluid velocity at their positions (rndm)."""
         u, d = self.u, self.d
