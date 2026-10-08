@@ -289,14 +289,21 @@ def forcing(uk,fk):
     return fk*isforcing*dealias
     
      
-def clip_zero(x):
-    """Clips negative values to zero and rescales the to conserve the mean
-    """
-    oldmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
-    x[:] = np.clip(x,0,None)
-    newmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
+def clip_zero(x,nislist = False):
     
-    return x*oldmean/newmean
+    if not nislist:
+        oldmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
+        x[:] = np.clip(x,0,None)
+        newmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
+        x[:] *= oldmean/newmean
+        return x
+    
+    for jj in range(len(x)):
+        oldmean = comm.allreduce(np.sum(x[jj]),op = MPI.SUM)/N**3
+        x[jj] = np.clip(x[jj],0,None)
+        newmean = comm.allreduce(np.sum(x[jj]),op = MPI.SUM)/N**3
+        x[jj] *= oldmean/newmean
+    return x
 
     # """Clips values between zero and nmin_thresh to zero and and rescales the to conserve the mean
     # """

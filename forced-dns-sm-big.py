@@ -10,7 +10,7 @@ from particles import MPI_particles
 from initial_conditions import InitialConditions
 curr_path = pathlib.Path(__file__).parent
 forcestart = False #! True : fresh velocity field, False : load the saved fields
-start_big_particle = False #! True : place the big particles afresh, False : load their saved state
+start_big_particle = True #! True : place the big particles afresh, False : load their saved state
 if int(sys.argv[-1]) ==0 :
     gravity = False
 else: 
@@ -32,7 +32,7 @@ else : isexplicit = 0.
 N = 256
 dt =  0.2*0.256/N #! Such that increasing resolution will decrease the dt
 dtmax = 5*0.256/N
-dtmin = 0.2*0.256/N
+dtmin = 0.0005*0.256/N
 T = 100
 dt_save_fields = 1.0
 dt_save_particles = 0.1 #! dt_save_fields should be a multiple of this
@@ -95,7 +95,7 @@ if rank ==0 : print(kx_diff.shape, ky_diff.shape, kz_diff.shape)
 lp = 1 # Hyperviscosity power
 # nu0 = 8.192 #! Viscosity for N = 1
 # nu0 = 4.714 #! Viscosity from Pope's 256 run 
-nu0 = 0.59 #! Viscosity for N = 1
+nu0 = 0.5 #! Viscosity for N = 1
 m = float(sys.argv[-2]) #! Desired kmax*eta
 
 kmax = N*2**0.5//3
@@ -122,7 +122,7 @@ nmin_thresh = TWO_PI**3/nprtcls0/(dx*dy*dz)
 
 #––––  Kolmogorov length scale - \eta \epsilon etc...––––––––-
 
-f0 = (nu0)**3 * TWO_PI**3/ nshells #! Total power input at each shells
+f0 = 0.5 * TWO_PI**3/ nshells #! Total power input at each shells
 
 
 if rank ==0 : print(f" Power input  density : {nshells*f0/TWO_PI**3} \n Viscosity : {nu}, Re : {1/nu},dt : {dt}, desired t_eta {tf}")
@@ -308,24 +308,26 @@ def forcing(uk,fk):
     return fk*isforcing*dealias
     
      
-def clip_zero(x,list = False):
+def clip_zero(x,nislist = False):
     """Clips negative values to zero and rescales the to conserve the mean
     """
-    if not list:
+    if not nislist:
         oldmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
         x[:] = np.clip(x,0,None)
         newmean = comm.allreduce(np.sum(x),op = MPI.SUM)/N**3
-        return x*oldmean/newmean
+        if oldmean * newmean <= 0:
+            raise ValueError("means must be nonzero and share a sign")
+        x[:] *= oldmean / newmean
+        return x*1.0
     
-    for jj in range(len(x)):
+    for jj in range(x.shape[0]):
         oldmean = comm.allreduce(np.sum(x[jj]),op = MPI.SUM)/N**3
         x[jj] = np.clip(x[jj],0,None)
         newmean = comm.allreduce(np.sum(x[jj]),op = MPI.SUM)/N**3
-        x[jj] *= oldmean/newmean
-    return x
-
-
-
+        if oldmean * newmean <= 0:
+            raise ValueError("means must be nonzero and share a sign")
+        x[jj] *= oldmean / newmean
+    return x*1.0
 
 
 
@@ -394,11 +396,11 @@ def full_RHS(t,uk, n,sump, tempcoord, stbs,ku =ku,kn = kn,fc = fc,visc = 1,forc 
     
     vtemp[0] = irfft_mpi(vk[0]*phase_k*dealias, vtemp[0])
     vtemp[1] = irfft_mpi(vk[1]*phase_k*dealias, vtemp[1])
-    vtemp[2] = irfft_mpi(vk[2]*phase_k*dealias, vtemp[2]) 
+    vtemp[2] = irfft_mpi(vk[2]*phase_k*dealias, vtemp[2])  -tps*g #! Shift for mode k =0 is zero. So the same term applies.
     
     v[0] = irfft_mpi(vk[0]*dealias, v[0])
     v[1] = irfft_mpi(vk[1]*dealias, v[1])
-    v[2] = irfft_mpi(vk[2]*dealias, v[2]) -tps*g *2.0 #! Adding 2 on gravity so that it gets adjusted when added with a factor of half.
+    v[2] = irfft_mpi(vk[2]*dealias, v[2]) -tps*g 
 
     for ii in range(len(stb_s)):
         
@@ -435,7 +437,9 @@ def RK4(t,h,stbs, uk,n,uknew = uknew, nnew = nnew,sump = sump, tempcoord = tempc
         sump[j] = stbs[j].coord*1.0
         tempcoord[j] = stbs[j].coord*1.0
     comm.Barrier()
-    ku[:],kn[:],kps[:],sump[:] = full_RHS(t,uk, clip_zero(n,list = True),sump,tempcoord,stbs)
+    
+    
+    ku[:],kn[:],kps[:],sump[:] = full_RHS(t,uk, clip_zero(n,nislist = True),sump,tempcoord,stbs)
     for j in range(len(stb_s)): 
         sump[j] += h/6.0*kps[j]
         tempcoord[j] = stbs[j].coord + h/2 *kps[j]
@@ -443,27 +447,33 @@ def RK4(t,h,stbs, uk,n,uknew = uknew, nnew = nnew,sump = sump, tempcoord = tempc
     nnew += h/6.0*kn
     
 
-    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h/2,uk + ku*h/2, clip_zero(n + kn*h/2,list = True),sump, tempcoord, stbs)
+    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h/2,uk + ku*h/2, clip_zero(n + kn*h/2,nislist = True),sump, tempcoord, stbs)
     for j in range(len(stb_s)): 
         sump[j] += h/3.*kps[j]
         tempcoord[j] = stbs[j].coord + h/2 *kps[j]
     uknew += h/3.0*ku
     nnew += h/3.0*kn
     
-    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h/2,uk + ku*h/2, clip_zero(n + kn*h/2, list = True),sump, tempcoord, stbs)
+    
+    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h/2,uk + ku*h/2, clip_zero(n + kn*h/2, nislist = True),sump, tempcoord, stbs)
     for j in range(len(stb_s)): 
         sump[j] += h/3.0*kps[j]
         tempcoord[j] = stbs[j].coord + h *kps[j]
     uknew += h/3.0*ku
     nnew += h/3.0*kn
     
-    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h,uk + ku*h, clip_zero(n + kn*h, list = True),sump, tempcoord, stbs)
+    ku[:],kn[:],kps[:],sump[:] = full_RHS(t + h,uk + ku*h, clip_zero(n + kn*h, nislist = True),sump, tempcoord, stbs)
     for j in range(len(stb_s)): 
         sump[j] += h/6.*kps[j]
         stbs[j].coord = 1.0*sump[j]
         
     uknew += h/6.0*ku
     nnew += h/6.0*kn
+    
+    # for jj in range(len(stb_s)):
+    #     nmean = comm.allreduce(np.sum(nnew[jj]),op = MPI.SUM)/N**3
+    #     if rank == 0: print(f"neman {nmean}")   
+    # raise SystemExit
     
     return uknew,nnew
     
@@ -614,19 +624,21 @@ def evolve_and_save(t,  u,n):
             save(i,tt,uk,n,stbs,savefields)
         ## –––––––––––––––––––––––––––––––––––––––––––––––––– ##
         t3 = time()
-        
-        
+ 
+    
         
         comm.Barrier()
         uknew[:],nnew[:] = RK4(tt,h,stbs, uk,n)
         comm.Barrier()
         hnew = dtmax
-        for j in range(len(stb_s)):
-            stbs[j].update_intrinsic()
-            minst = np.min(stbs[j].st) if len(stbs[j].st.ravel()) > 0 else 65536
+        for jj in range(len(stb_s)):
+            stbs[jj].update_intrinsic()
+            minst = np.min(stbs[jj].st) if len(stbs[jj].st.ravel()) > 0 else 65536
             stmin = comm.allreduce(minst,op = MPI.MIN)
-            hnew = min(hnew,0.1*stmin)
-            n[j] = clip_zero(nnew[j],list =  True)
+            hnew = min(hnew,0.5*stmin*tf)
+            n[jj] = clip_zero(nnew[jj])
+            # nmean = comm.allreduce(np.sum(n[jj]),op = MPI.SUM)/N**3
+            # if rank == 0: print(f"neman {nmean}, {init_name[jj]} = {stb_s[jj]}")
         uknew[:] = (uknew)*hypervisc
         h = hnew
         if rank==0: print(f"For next step h : {h}")
@@ -635,8 +647,10 @@ def evolve_and_save(t,  u,n):
         # pk[:] = rfft_mpi(n,pk)*dealias
         # n[:] = irfft_mpi(pk,n)
         # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––- #
-        
-        
+            
+            
+            
+        # raise SystemExit
        
         
         """ Enforcing the reality condition """
@@ -723,12 +737,16 @@ for i,stb in enumerate(stbs):
     nmean = comm.allreduce(n[i].sum(),op =MPI.SUM)/N**3
     nmax = comm.allreduce(n[i].max(),op =MPI.MAX)
     nmin = comm.allreduce(n[i].min(),op =MPI.MIN)
+    stb.update_intrinsic()
+    # maxgrowth = comm.allreduce((rhop * stb.growthfactor*(stb.coord[:,-1])**(2./3.)).max(),op = MPI.MAX)
+    # maxdecel = comm.allreduce((stb.decelerationfactor*(stb.coord[:,-1])**(-1./3.)).max(), op = MPI.MAX)
+
     tot_mass = comm.allreduce(np.sum(stb.coord[:,-1]),op = MPI.SUM)
     tot_prtcl = comm.allreduce(stb.coord[:,-1].size, op = MPI.SUM)
-    nmean
     if rank ==0 : 
         print(f"{stb_s[i]:>10} {tot_mass:>12.4g} {tot_prtcl:>10} {Nprtcl[i]:>10} "
               f"{tot_mass / (nmean * TWO_PI**3):>10.4g} {5/72:>12.4g} {nmax:>10.4g} {nmin:>10.4g} {nmean:>10.4g}")
+n = clip_zero(n,nislist = True)
 # raise SystemExit
 # ––––––––––––––––––––––––––––––––––––––––––––––––––
 

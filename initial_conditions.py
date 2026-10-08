@@ -215,6 +215,15 @@ class InitialConditions:
         ntemp = np.zeros_like(u[0])
 
         if self.rank == 0: print("Starting big particles from scratch")
+        #! all sets are placed uniformly and routed to the rank owning their x; the Q masks below overwrite all but the random sets.
+        for jj in range(len(self.stb_s)):
+            stb = stbs[jj]
+            nprtcl_proc = Nprtcl[jj]//self.num_process
+            stb.coord = np.zeros((nprtcl_proc,stb.coord.shape[-1]))
+            stb.coord[:,:d] = np.random.uniform(0,self.L,(nprtcl_proc,d))
+            stb.prtclid = self.rank*nprtcl_proc + np.arange(nprtcl_proc).reshape(-1,1)
+            stb.coord,[stb.prtclid] = stb.send(stb.coord,[stb.prtclid])
+
         # ------------------ calculating Q ------------------ #
         u[0] = irfft_mpi(uk[0]*self.phase_k*dealias, u[0])
         u[1] = irfft_mpi(uk[1]*self.phase_k*dealias, u[1])
@@ -304,9 +313,19 @@ class InitialConditions:
             stb.coord[:,-1] = self.stb_s[jj]**1.5*stb.factor
             stb.update_intrinsic()
     def attach_velocity(self, stbs):
-        """Gives already-placed particles the fluid velocity at their positions (rndm)."""
+        """Places the big particles uniformly and gives them the fluid velocity at their positions (rndm)."""
         u, d = self.u, self.d
-        for stb in stbs:
+
+        if self.rank == 0: print("Starting big particles from scratch")
+        for jj in range(len(self.stb_s)):
+            stb = stbs[jj]
+            nprtcl_proc = self.Nprtcl[jj]//self.num_process
+            stb.coord = np.zeros((nprtcl_proc,stb.coord.shape[-1]))
+            stb.coord[:,:d] = np.random.uniform(0,self.L,(nprtcl_proc,d))
+            stb.coord[:,-1] = self.stb_s[jj]**1.5*stb.factor
+            stb.prtclid = self.rank*nprtcl_proc + np.arange(nprtcl_proc).reshape(-1,1)
+            stb.coord,[stb.prtclid] = stb.send(stb.coord,[stb.prtclid])
+            stb.interpmat = np.zeros((stb.coord.shape[0], stb.interpmat.shape[1])) #! send changed the particle count on this rank
             stb.interpmat = stb.interp_cosine(stb.coord,np.concatenate((u,u[0][None,:]),axis = 0))
             stb.coord[:,d:2*d] = stb.interpmat[:,:d]
 
