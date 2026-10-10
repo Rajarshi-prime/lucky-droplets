@@ -230,9 +230,15 @@ adversarial, and why every gate is a request to the user with an exact command.
 
 ---
 
-## 9. Before starting
+## 9. The C7 baseline, and what is in it
 
-**Commit the working-tree fixes.** C7 needs a baseline. Uncommitted at the time of writing:
+**The baseline is commit `e076637` ("plan for agent codes."), reachable as `HEAD` when the port
+begins.** C7 is checked with `git diff e076637 -- <file>`; anything non-empty there is the
+port's doing. The working tree was clean at the time of writing apart from
+`.claude/settings.local.json`, which is machine-local and deliberately untracked.
+
+That commit carries fixes made shortly before this plan. They are **not** the port's work and
+must not be reverted:
 
 - `particles.py` — mass convention: `n_cs_factor` moved out of `growthfactor` into the mass
   equation; `decelerationfactor` derived from `growthfactor`; `rb` corrected at lines 218 and
@@ -242,7 +248,8 @@ adversarial, and why every gate is a request to the user with an exact command.
   variants and 3-D for the density-only ones; `> 1` was true for both.
 - `forced-dns-sm-big.py` — one comment at line 426.
 
-These are verified by hand but **not yet verified on the cluster**. Outstanding there: `rb0s` at
+These are verified by hand and by review but **not yet verified on the cluster**, so they are a
+known open risk sitting underneath this port rather than settled ground. Outstanding there: `rb0s` at
 `forced-dns-sm-big-rndm.py:179` should drop by `(M0*rhop)**(1/3) = 4.16`; `big` should be
 unchanged to round-off; and the 20 density fields, which differ only through `fc`, should
 separate after the fix where they were near-identical before. `rndm` results produced before the
@@ -271,12 +278,13 @@ These decisions are closed. Do not re-open them or propose alternatives:
     No oracle, no --selftest, no generated check scripts, no assertion scaffold.
   - initial_conditions.py is not ported. The new code only reads what it writes.
 
-Two things before any code is written:
-  1. Confirm the working tree is committed. C7 measures the port against that
-     baseline, and without it control-reviewer cannot run.
-  2. G0 is a hard gate: tests/cpu_emu.h is missing, so the no-GPU build cannot
-     compile. Nothing starts until it is present and both builds succeed. If it
-     cannot be obtained, stop and tell me rather than working around it.
+Before any code is written: G0 is a hard gate. tests/cpu_emu.h is missing, so
+the no-GPU build cannot compile. Nothing starts until it is present and both
+builds succeed. If it cannot be obtained, stop and tell me rather than working
+around it.
+
+The C7 baseline is already committed as e076637, reachable as HEAD. Check the
+port against it with: git diff e076637 -- <file>
 
 Nothing compiles or runs in this sandbox — no nvcc, no clang++, no numpy. Every
 gate is a command for me to run. Give me the exact command and the exact number
