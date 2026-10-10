@@ -255,3 +255,35 @@ fix used a collision area roughly 10x to 15x too large.
 `plan-mpi-batching.tex` is a separate plan for the cluster code: batching the Stokes axis through
 the existing MPI transforms, taking collective calls per step from ~1216 to ~152. Independent of
 this port and can proceed in parallel. Its agents are **not** written.
+
+---
+
+## 11. Launch prompt for a fresh session
+
+```
+Read PLAN-GPU-PORT.md in full, then drive it using the gpu-manager agent.
+
+These decisions are closed. Do not re-open them or propose alternatives:
+  - CUDA C, extending forced_ns_ck54_lowmem.cu. Not CuPy.
+  - fp64 throughout. Single precision was considered and declined.
+  - Classical RK4. CK54 stays only behind -DUSE_CK54, as the velocity-path check.
+  - Verification is mine, by checkpoint comparison against the MPI code.
+    No oracle, no --selftest, no generated check scripts, no assertion scaffold.
+  - initial_conditions.py is not ported. The new code only reads what it writes.
+
+Two things before any code is written:
+  1. Confirm the working tree is committed. C7 measures the port against that
+     baseline, and without it control-reviewer cannot run.
+  2. G0 is a hard gate: tests/cpu_emu.h is missing, so the no-GPU build cannot
+     compile. Nothing starts until it is present and both builds succeed. If it
+     cannot be obtained, stop and tell me rather than working around it.
+
+Nothing compiles or runs in this sandbox — no nvcc, no clang++, no numpy. Every
+gate is a command for me to run. Give me the exact command and the exact number
+you need back, then wait. Never mark a gate passed without it.
+
+Start with G0 and report.
+```
+
+`gpu-manager` cannot ask a question mid-run, so expect a stop-and-return rhythm: it works a
+batch, returns with the commands it needs run, and waits for the numbers.
