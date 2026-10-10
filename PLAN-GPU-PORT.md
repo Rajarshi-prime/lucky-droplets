@@ -36,10 +36,13 @@ velocity path (see C1).
 
 ---
 
-## 2. Verification — the user's, by checkpoint comparison
+## 2. Verification — the user's, by checkpoint comparison, after the code is complete
 
 The user runs the current MPI code for one step at a chosen `dt_save`, loads the same checkpoint
 into the GPU code, steps once, and compares.
+
+**This happens after delivery, not during the port.** No agent waits on a command. The agents
+write the whole of §5 and hand it over; the user compiles and compares later.
 
 **That is the whole method.** No numpy oracle, no `--selftest`, no generated check scripts, no
 assertion scaffold. This has been decided twice. If an agent proposes test machinery, that is a
@@ -108,13 +111,19 @@ rather than failing inside `cudaMalloc`.
 
 ## 5. Files
 
-Three new. Nothing existing is modified.
+Five new. Nothing existing is modified.
 
 | file | owner |
 | --- | --- |
 | `droplet_kernels.cuh` | kernel-coder |
 | `forced_ns_droplets.cu` | cuda-coder |
 | `unpack_checkpoint.py` | cuda-coder |
+| `tests/cpu_emu.h` | cuda-coder |
+| `HANDOVER-GPU-PORT.md` | cuda-coder, from gpu-manager's notes |
+
+`HANDOVER-GPU-PORT.md` is written last and is what the user reads when there is time to test: the
+exact build commands for both builds, the exact run commands, the checkpoint comparison of §2 in
+order, and a list of everything the agents could not check here.
 
 Read-only references: `forced-dns-sm-big.py`, `particles.py`, `initial_conditions.py`,
 `forced_ns_ck54_lowmem.cu`. **`initial_conditions.py` is not ported** — the user generates
@@ -126,8 +135,8 @@ initial conditions with it as it stands, and the new code only reads what that l
 
 | | what | budget |
 | --- | --- | --- |
-| G0 | Obtain `tests/cpu_emu.h`; confirm both builds; run the existing `--verify`. **Hard gate.** | 0 |
-| G1 | `unpack_checkpoint.py`, and confirm a converted folder loads | +25 |
+| G0 | Write `tests/cpu_emu.h` so the `-DCPU_EMU` build has something to compile against | +25 |
+| G1 | `unpack_checkpoint.py` | +25 |
 | G2 | **The contract**: `droplet_kernels.cuh` signatures, struct layouts, the memory map as a function of `NFIELDS`, the startup refusal | +70 |
 | G3 | Scalar `k_scatter_s` / `k_gather_s` from 284 and 309 | +35 |
 | G4 | Density state, compact spectral, 4 registers; `vk` from `u - tau_s Du/Dt` | +45 |
@@ -139,9 +148,11 @@ initial conditions with it as it stands, and the new code only reads what that l
 | G10 | Classical RK4 beside the existing `rk_step`, switched at compile time | +50 |
 | G11 | Per-Stokes output and restart reading | +80 |
 
-**G0 is a hard gate.** `tests/cpu_emu.h` is not in this repository, so the no-GPU build at
-`forced_ns_ck54_lowmem.cu:71` cannot be compiled. Nothing starts until it is present and both
-builds succeed.
+**G0 is no longer a gate.** `tests/cpu_emu.h` is not in this repository, so the no-GPU build at
+`forced_ns_ck54_lowmem.cu:71` has nothing to include. `cuda-coder` writes it from the uses in
+`forced_ns_ck54_lowmem.cu` — `emu_launch`, the thread indices, `atomicAdd`, the memory and
+stream calls — and the port continues whether or not it is right, since nothing here can compile
+it. The handover records it as written but never compiled.
 
 **G2 is the pivot.** Before it, serial; after it, kernel-coder and cuda-coder work in parallel
 on separate files. Two writers in one file is how this goes wrong.
@@ -193,7 +204,7 @@ Already written in `.claude/agents/`. Invoke `gpu-manager` to drive; it spawns t
 
 | agent | model | effort | owns |
 | --- | --- | --- | --- |
-| gpu-manager | sonnet | medium | order, gates, write lock. Writes no code |
+| gpu-manager | sonnet | medium | order, reviews, write lock. Writes no code |
 | cuda-coder | opus | high | `forced_ns_droplets.cu`, the converter |
 | kernel-coder | opus | xhigh | `droplet_kernels.cuh` — the race-prone half |
 | memory-reviewer | opus | high | every allocation, lifetime, peak against §3 |
@@ -226,7 +237,8 @@ find errors that produce plausible numbers.
 
 Nothing compiles or runs in the sandbox — no `nvcc`, no `clang++`, no numpy. Review is the only
 verification before the code reaches the cluster, which is why the reviewers are narrow and
-adversarial, and why every gate is a request to the user with an exact command.
+adversarial. The reviewers stand in for the gates: a task is finished when its reviewer has no
+remaining finding, and the run carries on to the next task without stopping.
 
 ---
 
@@ -278,20 +290,21 @@ These decisions are closed. Do not re-open them or propose alternatives:
     No oracle, no --selftest, no generated check scripts, no assertion scaffold.
   - initial_conditions.py is not ported. The new code only reads what it writes.
 
-Before any code is written: G0 is a hard gate. tests/cpu_emu.h is missing, so
-the no-GPU build cannot compile. Nothing starts until it is present and both
-builds succeed. If it cannot be obtained, stop and tell me rather than working
-around it.
+Do not stop to ask me to run anything. I am not available to test during this
+run. Go from G0 to G11 without pausing, and hand me the complete code at the
+end. tests/cpu_emu.h is missing: write it from how forced_ns_ck54_lowmem.cu
+uses it and carry on.
 
 The C7 baseline is already committed as e076637, reachable as HEAD. Check the
 port against it with: git diff e076637 -- <file>
 
-Nothing compiles or runs in this sandbox — no nvcc, no clang++, no numpy. Every
-gate is a command for me to run. Give me the exact command and the exact number
-you need back, then wait. Never mark a gate passed without it.
+Nothing compiles or runs in this sandbox — no nvcc, no clang++, no numpy. The
+reviewers are the only check available, so a task is finished when its reviewer
+has no finding left, and you move straight to the next one.
 
-Start with G0 and report.
+Finish by writing HANDOVER-GPU-PORT.md: every command I will need, in order,
+and everything you could not check here. Then report.
 ```
 
-`gpu-manager` cannot ask a question mid-run, so expect a stop-and-return rhythm: it works a
-batch, returns with the commands it needs run, and waits for the numbers.
+`gpu-manager` runs straight through. Nothing in the sequence waits on the user; whatever cannot
+be settled by review is recorded in `HANDOVER-GPU-PORT.md` and tested on the cluster later.
