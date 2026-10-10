@@ -10,6 +10,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Keep responses brief, concise and clear. State the cause and the fix. Cut background, restatement and anything I did not ask for.
 - Before editing, find the relevant code and identify the smallest change needed. Implement only that change. After editing, review the diff and remove anything that is not necessary.
 - Make and agent called 'distiller' and store in /claude. 'distiller' reviews the diff at the end of every prompt response, and suggests edits that simplifies the changes according to the python style given below. Implement those changes.
+- DO ONLY WHAT IS ASKED. STOP SUGGESTING WHAT YOU CAN DO NEXT.
+- SPEAK IN PROPER ENGLISH.
+
 
 # Python style
 
@@ -36,7 +39,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Words to avoid in code and responses
 USE PROPER ENGLISH WITH FULL SENTENCES.
 
-- wire, mid-migration, live, simply, just, engine, landed, folded, cadence, stack
+- wire, mid-migration, live, simply, just, engine, landed, folded, cadence, stack, harness, deliverables
 
 
 ## What this is
@@ -71,14 +74,14 @@ Order inside each: parameter block → `forcing()` → `clip_*()` → `full_RHS(
 
 **Where the time goes in `big`.** The density loop runs 20 times per RHS call and four times per step at about eleven MPI transforms each — roughly 880 per step against 96 for the velocity — and `pRHS` calls `send`, so 80 `Alltoall` + `Alltoallv` rounds per step. The 20 fields cannot be collapsed into one: `v` is built from `tps` and is shared, but the fields differ through the droplet feedback `fc`. The transform of `fc` is not bookkeeping — `fc` is laid down by the cosine kernel and reaches the grid Nyquist, so the forward transform is what projects it onto the retained modes.
 
-**Known and unfixed in `big`.** The blow-up guard tests `uk.max()`, which orders complex numbers by real part first, so a blow-up in the imaginary part passes. `clip_zero` divides by `newmean` unguarded, and its two branches differ in kind: `list = True` mutates and returns the same array, the plain form mutates and returns a different one. The end-of-step clip calls the `list = True` form on a single Stokes row, so the loop runs over the rank's `Np` x-slices and rescales each group of planes separately — the same answer as the plain form only at `num_process = N`, where `Np` is 1. `h` is bounded by `0.1*stmin`, a dimensionless Stokes number rather than the relaxation time `st*tf`; left that way on purpose. `dtmin` sets the first step and never floors `hnew`. The save trigger holds only while `h < dt_save_particles`, which `dtmax` does not enforce. Clipping is applied to the RK4 stage values, dropping the scheme below fourth order in `n` — a known compromise. `save` hands the module-level time array to `full_RHS` where its own `tt` is in hand, harmless as `pRHS` never reads it. Dead: `load_trunc`, `load_hdf5`, `cond_ky`/`cond_kz`, `param`, `ek_arr0`, and the `rs` → `nprtcls0` → `nmin_thresh` chain. `review-20261006.md` carries these with line numbers, along with the open speed-ups.
+**Known and unfixed in `big`.** The blow-up guard tests `uk.max()`, which orders complex numbers by real part first, so a blow-up in the imaginary part passes. `dtmin` sets the first step and never floors `hnew`. The save trigger holds only while `h < dt_save_particles`, which `dtmax` does not enforce. Clipping is applied to the RK4 stage values, dropping the scheme below fourth order in `n` — a known compromise. `save` hands the module-level time array to `full_RHS` where its own `tt` is in hand, harmless as `pRHS` never reads it. Dead: `load_trunc`, `load_hdf5`, `cond_ky`/`cond_kz`, `param`, `ek_arr0`, and the `rs` → `nprtcls0` → `nmin_thresh` chain. `review-20261006.md` carries these with line numbers, along with the open speed-ups.
 
 ## `initial_conditions.py`
 
 `InitialConditions` owns both startup paths: load a saved state, or build a fresh one, chosen by `forcestart` and `start_big_particle`. Variants are constructor arguments, not separate code paths:
 
 - `mode` — `"all_stokes"` (both particle variants): of the folders holding a `Fields_k_*.npz`, the newest per Stokes number, then the *minimum* across them, then one `dt_save` earlier, so every set has state and a partially-written folder is skipped. `"second_last"` for density-only variants; `"first"` unused.
-- `clip` / `ntransform` / `ndefault` — the variant's clip function; log-sm passes `np.log` and `0.0` since disk holds `n`. A 4-D `n` is clipped one Stokes row at a time, as the mean inside is a global sum. `big` adds a `list = True` argument to its `clip_zero`, which does that loop over the first axis itself; `apply_clip` calls the plain form row by row.
+- `clip` / `ntransform` / `ndefault` — the variant's clip function; log-sm passes `np.log` and `0.0` since disk holds `n`. A 4-D `n` is clipped one Stokes row at a time, as the mean inside is a global sum. `big` adds a `nislist = True` argument to its `clip_zero`, which does that loop over the first axis itself; `apply_clip` calls the plain form row by row.
 - `load_dealias` — `False` for big, `True` elsewhere.
 - `fresh_particles` — `"qcriterion"` (big) or `"velocity"` (rndm).
 - `init_name = None` for rndm, whose folders omit `_init_`. `particle_dir()` is the only place that name is built.
@@ -104,7 +107,7 @@ Weights are `(1 + cos(pi*d/(2*dx)))/4` per direction, non-negative and summing t
 
 `send` takes the stage coordinate as its first argument and the arrays that must follow it as the second. Only the first is wrapped with `%= L`, so `self.coord` and the RK4 accumulator can hold positions outside `[0,L)` between calls. Nothing reads them there — interpolation uses the wrapped first argument, routing goes through `sendbuf[:,0] % L`, and `save` wraps `stb.coord` by passing it in the first slot. Both arguments must carry the same number of rows, since one mask indexes all of them.
 
-Two things to know: `update_intrinsic` does no MPI, whatever its docstring says; and `rb` omits `rho_p`, so it sits a factor `rho_p**(1/3)` above the radius convention of `factor` and of `rs` in the scripts. Only `stoch_updt` reads `rb`, so `rndm` alone is affected, and its collision area is 100 times too large at `rho_p = 1000`.
+Two things to know: `update_intrinsic` does no MPI, whatever its docstring says; and `coord[:,-1]` holds the physical droplet mass, so `rb = (coord[:,-1]*M0*0.75/pi)**(1/3)` carries a spurious `M0` while still omitting `rho_p`, against the correct `(3*m/(4*pi*rho_p))**(1/3)`. The two errors nearly cancel, leaving a factor `(M0*rho_p)**(1/3)`, about 0.9. Only `stoch_updt` reads `rb`, so `rndm` alone is affected.
 
 ## Data layout
 

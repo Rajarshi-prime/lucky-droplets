@@ -88,8 +88,8 @@ class MPI_particles:
         self.factor = ((4*np.pi*rho_p)*(tau_eta)**(1.5)*(nu)**(1.5) *27 )/(3 * rho_p**(1.5)*2**(1.5))#! Factor connecting mass and stokes number.
         
         self.n_cs_factor = (M0/self.rhop) #* Factor relating volume fraction (c_s) and to the n whose mean is 1. c_s =  n *n_cs_factor.
-        self.growthfactor = (3*(np.pi**2)/(4*rho_p))**(2./3.)*self.n_cs_factor #! Factor for growth and decay. Multiply with rho_p in the Mdot equation.
-        self.decelerationfactor = 3./4.*((4*np.pi*rho_p)/3.)**(1./3.)*self.n_cs_factor
+        self.growthfactor = (3*(np.pi**0.5)/(4*rho_p))**(2./3.) #! Factor for decay of n. Multiply with rho_p and n_cs_factor in the Mdot equation.
+        self.decelerationfactor = self.growthfactor*self.rhop*self.n_cs_factor
         
         self.nneighbors = math.ceil(self.cosorder/(2*self.Np)) 
         neighbors = [(self.rank - (self.nneighbors -i))%self.num_process for i in range(self.nneighbors)] + [(self.rank + (i + 1))%self.num_process for i in range(self.nneighbors)]
@@ -104,7 +104,7 @@ class MPI_particles:
 
         # ------------------- initializing particles ------------------- #
     
-        self.coord = np.random.uniform(0,self.L,(self.Nprtcl_proc,2*self.d +1 )) #! Contains both position and velocity and the mass normalized by M0 initialized randomly between zero and two pi 
+        self.coord = np.random.uniform(0,self.L,(self.Nprtcl_proc,2*self.d +1 )) #! Contains both position and velocity and the physical mass initialized randomly between zero and two pi
         self.prtclid = np.arange(self.rank*self.Nprtcl_proc,(self.rank
          + 1)*self.Nprtcl_proc).reshape((-1,1)) #! Unique particle ID
         self.coord[:,-1] = st**1.5*self.factor
@@ -215,7 +215,7 @@ class MPI_particles:
         
         self.st = (self.coord[:,-1]/self.factor)**(2/3.)
         self.rhs = 0.0*self.coord
-        self.rb = (self.coord[:,-1]*self.M0*(0.75/np.pi))**(1./3.)
+        self.rb = (self.coord[:,-1]*(0.75/np.pi)/self.rhop)**(1./3.)
         
     #@profiler
     def particle_exchange(self,coord):
@@ -894,14 +894,14 @@ class MPI_particles:
         
         self.interpmat = self.interp_cosine(coord,np.concatenate((u,us,c[None,...]), axis = 0)) #! Interpmat has u,us and c => 2*d+1 components.
         
-        self.exterpmat[:,0] = self.growthfactor*(1 + (self.st_s/self.st)**0.5)**2 *coord[:,-1]**(2./3.)* self.interpmat[:,-1]*np.linalg.norm(coord[:,self.d:self.d*2] - self.interpmat[:,self.d: 2*self.d],axis = 1) #! exterpmat is mdot normalized by M0.
+        self.exterpmat[:,0] = self.growthfactor*(1 + (self.st_s/self.st)**0.5)**2 *coord[:,-1]**(2./3.)* self.interpmat[:,-1]*np.linalg.norm(coord[:,self.d:self.d*2] - self.interpmat[:,self.d: 2*self.d],axis = 1) #! exterpmat is the number of small droplets swept per unit time.
         fc[:] = self.exterp_cosine_scalar(coord, fc)
 
         
         self.rhs[:,:self.d] = coord[:,self.d:2*self.d]
         self.rhs[:,self.d:2*self.d] =  (self.interpmat[:,:self.d]- coord[:,self.d:2*self.d])/(self.st[:,None] *self.tau_eta)  + ((self.decelerationfactor*(1 + (self.st_s/self.st)**0.5)**2 /coord[:,-1]**(1./3.))* self.interpmat[:,-1]*np.linalg.norm(coord[:,self.d:self.d*2] - self.interpmat[:,self.d: 2*self.d],axis = 1) )[:,None]*(self.interpmat[:,self.d: 2*self.d] - coord[:,self.d:self.d*2]) 
         self.rhs[:,2*self.d - 1] -= self.g #! Adding gravity in the appropriate units.
-        self.rhs[:,-1] = self.exterpmat[:,0]*self.rhop
+        self.rhs[:,-1] = self.exterpmat[:,0]*self.rhop*self.n_cs_factor
         
         return sump, self.rhs, fc
         
@@ -934,7 +934,7 @@ class MPI_particles:
 
         coord,[self.coord, self.interpmat,self.prtclid] = self.send(coord,[self.coord, self.interpmat,self.prtclid])
         self.st = (coord[:,-1]/self.factor)**(2/3.)
-        self.rb = (coord[:,-1]*self.M0*(0.75/np.pi))**(1./3.)
+        self.rb = (coord[:,-1]*(0.75/np.pi)/self.rhop)**(1./3.)
         self.rhs = 0.0*coord
         
         self.interpmat = self.interp_cosine(coord,np.concatenate((us,modA[None,...]), axis = 0)) #! Interpmat has u => d components.
@@ -946,7 +946,7 @@ class MPI_particles:
         # print(volume.mean(),self.dx**3)
         ms = self.rhop*np.pi*(rs)**3*(4.0/3.0)
         
-        self.rhs[:,-1] = ncoll*ms/self.M0 #! This is delta m / M0
+        self.rhs[:,-1] = ncoll*ms #! This is delta m
         self.rhs[:,self.d:2*self.d] =  (self.rhs[:,-1]/(coord[:,-1] + self.rhs[:,-1]))[:,None]*(self.interpmat[:,:self.d] - coord[:,self.d:2*self.d]  )
 
         return  coord + self.rhs

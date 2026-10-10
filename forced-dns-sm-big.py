@@ -423,7 +423,7 @@ def full_RHS(t,uk, n,sump, tempcoord, stbs,ku =ku,kn = kn,fc = fc,visc = 1,forc 
         divvnk += 1j*kz*rfft_mpi(vn[2],pk)*dealias*0.5
         
         fck[:] = rfft_mpi(fc, fck)*dealias
-        kn[ii] = irfft_mpi(-divvnk - fck ,kn[ii]) #! fck is the mass growth rate. so the - sign
+        kn[ii] = irfft_mpi(-divvnk - fck ,kn[ii]) #! fck is the depletion rate of n. so the - sign
     
     # comm.Barrier()    
     return ku,kn,kps,sump
