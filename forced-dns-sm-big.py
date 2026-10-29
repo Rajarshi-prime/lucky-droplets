@@ -32,13 +32,13 @@ else : isexplicit = 0.
 N = 256
 dt =  0.2*0.256/N #! Such that increasing resolution will decrease the dt
 dtmax = 5*0.256/N
-dtmin = 0.0005*0.256/N
+dtmin = 0.005*0.256/N
 T = 100
 dt_save_fields = 1.0
 dt_save_particles = 0.1 #! dt_save_fields should be a multiple of this
 tdec = max(0, int(np.ceil(-np.log10(min(dt_save_fields,dt_save_particles))))) #! decimals in the time_ folder names
-sts = 0.001
-stb_s = [0.017,0.017/4, 0.017*4,0.017*6.35]*5 #! For 5 different initial conditions.
+sts = 0.017
+stb_s = [0.017*4,0.017*2.52,0.017*6.35,0.017*10.08]*5 #! For 5 different initial conditions.
 uniquestbs = len(np.unique(stb_s))
 init_name = ['random']*uniquestbs + ['Qpos']*uniquestbs + ['Qneg']*uniquestbs + ['Qpos_high']*uniquestbs + ['Qneg_high']*uniquestbs
 if uniquestbs !=4 : raise SystemExit("Check the initial big Stokes numbers")
@@ -46,6 +46,8 @@ if uniquestbs !=4 : raise SystemExit("Check the initial big Stokes numbers")
 # stb_s.sort()
 stb_s= np.array(stb_s)
 Nprtcl = np.round(8192*(0.017/stb_s)**1.5).astype(np.int32) #! 10240 0.017 St particles.
+# if rank ==0: print(Nprtcl)
+# raise SystemExit
 
 if rank ==0: print(f"Stokes numbers:{stb_s}, number of particles : {Nprtcl}")
 # if rank ==0 : print(f"prtcl per rank : {Nprtcl//num_process}")
